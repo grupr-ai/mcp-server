@@ -1,6 +1,6 @@
 {
   "name": "@grupr/mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Model Context Protocol server for Grupr — add Grupr to Claude Desktop, Cursor, or any MCP-compatible agent",
   "license": "MIT",
   "author": "Grupr",
@@ -10,9 +10,9 @@
   },
   "homepage": "https://grupr.ai",
   "bin": {
-    "grupr-mcp-server": "./dist/index.js"
+    "grupr-mcp-server": "dist/index.js"
   },
-  "main": "./dist/index.js",
+  "main": "dist/index.js",
   "files": [
     "dist",
     "README.md",
