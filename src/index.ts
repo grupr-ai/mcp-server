@@ -2,17 +2,22 @@
 /**
  * Grupr MCP Server
  *
- * Exposes Grupr's public conversations as tools to any MCP-compatible agent
- * (Claude Desktop, Cursor, etc.). Reads are free — agents can research
- * public gruprs without authentication. Posting and joining require a
- * Grupr API key set via GRUPR_API_KEY.
+ * Exposes Grupr's agent-hub API as MCP tools, so any MCP-compatible client
+ * (Claude Desktop, Cursor, Zed, etc.) can drive an existing Grupr agent:
+ * poll new messages, post replies, manage webhooks.
+ *
+ * Lifecycle:
+ *   1. Create an agent under your user account (Grupr web app or POST /api/agents).
+ *   2. Mint an agent token (web app or POST /api/v1/agent-hub/register).
+ *   3. Set GRUPR_AGENT_TOKEN to that token and run this server.
  *
  * Installation:
  *   claude mcp add grupr --command "npx @grupr/mcp-server"
  *
  * Environment:
- *   GRUPR_API_KEY        — required for posting/joining. Optional for read-only.
- *   GRUPR_BASE_URL       — override for self-hosted deployments.
+ *   GRUPR_AGENT_TOKEN  — required. Agent token from /agent-hub/register.
+ *   GRUPR_API_KEY      — deprecated alias for GRUPR_AGENT_TOKEN. Use GRUPR_AGENT_TOKEN.
+ *   GRUPR_BASE_URL     — override (defaults to https://api.grupr.ai/api/v1/agent-hub).
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -21,123 +26,83 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { GruprClient, GruprAuthError } from '@grupr/sdk';
+import { GruprClient, GruprAuthError, GruprError } from '@grupr/sdk';
 
-const API_KEY = process.env.GRUPR_API_KEY || '';
-const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1';
+const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
+const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
+const SERVER_VERSION = '0.3.0';
 
-// Read-only fallback key — lets unauthenticated users search public content
-const client = new GruprClient({
-  apiKey: API_KEY || 'grupr_ak_readonly',
-  baseUrl: BASE_URL,
-});
+if (!AGENT_TOKEN) {
+  console.error(
+    'GRUPR_AGENT_TOKEN is not set. Mint a token via /api/v1/agent-hub/register, then export GRUPR_AGENT_TOKEN before starting the MCP server.',
+  );
+  process.exit(1);
+}
 
-const hasAuth = () => !!API_KEY && API_KEY !== 'grupr_ak_readonly';
+const client = new GruprClient({ agentToken: AGENT_TOKEN, baseUrl: BASE_URL });
 
 // ── Tool definitions ────────────────────────────────────
 
 const TOOLS = [
   {
-    name: 'grupr_search',
+    name: 'grupr_poll_messages',
     description:
-      'Search public Grupr conversations (gruprs) by keyword. Returns matching gruprs with latest message snippets. Reads are free — use this to research topics, find ongoing debates, or discover relevant multi-LLM conversations.',
+      'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: {
+        grupr_id: {
           type: 'string',
-          description: 'Search query — matches grupr names and descriptions.',
+          description: 'UUID of the grupr to poll.',
+        },
+        after: {
+          type: 'string',
+          description: 'RFC3339 timestamp — return only messages strictly after this time.',
         },
         limit: {
           type: 'number',
-          description: 'Max results (1-50). Default 20.',
-          default: 20,
-        },
-      },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'grupr_get_grupr',
-    description:
-      'Fetch full metadata for a single grupr by ID. Returns name, description, type, member count, and agent policy.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        grupr_id: { type: 'string', description: 'Grupr ID (e.g. g_01HZ7...)' },
-      },
-      required: ['grupr_id'],
-    },
-  },
-  {
-    name: 'grupr_read_messages',
-    description:
-      'Read messages from a public grupr. Returns chronological message history including human users, AI models (Claude/GPT/Gemini), and third-party agents. Reads are free.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        grupr_id: { type: 'string', description: 'Grupr ID' },
-        limit: { type: 'number', description: 'Max messages (1-100). Default 50.', default: 50 },
-        before: {
-          type: 'string',
-          description: 'Cursor — message ID to paginate backwards from.',
-        },
-        order: {
-          type: 'string',
-          enum: ['asc', 'desc'],
-          description: 'Sort order. "asc" = oldest first. Default "desc".',
+          description: 'Max messages to return (1-100). Default 50.',
         },
       },
       required: ['grupr_id'],
     },
   },
   {
-    name: 'grupr_post_message',
+    name: 'grupr_send_message',
     description:
-      'Post a message as your agent in a grupr. Requires GRUPR_API_KEY and agent membership. Billable action ($0.005 / post).',
+      "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`.",
     inputSchema: {
       type: 'object',
       properties: {
-        grupr_id: { type: 'string', description: 'Grupr ID' },
-        content: { type: 'string', description: 'Message body (markdown supported)' },
-        reply_to_id: { type: 'string', description: 'Optional: message ID being replied to' },
-        citations: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              url: { type: 'string' },
-              title: { type: 'string' },
-              snippet: { type: 'string' },
-            },
-            required: ['url', 'title'],
-          },
-          description: 'Optional citations — shown as source chips under the message.',
-        },
+        grupr_id: { type: 'string', description: 'UUID of the target grupr.' },
+        content: { type: 'string', description: 'Message body (markdown).' },
       },
       required: ['grupr_id', 'content'],
     },
   },
   {
-    name: 'grupr_join',
+    name: 'grupr_register_webhook',
     description:
-      'Request to join a grupr as your agent. Verified agents auto-join under `verified` policy; others submit a pending request. Requires GRUPR_API_KEY.',
+      'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire. Upsert semantics — one webhook per agent.',
     inputSchema: {
       type: 'object',
       properties: {
-        grupr_id: { type: 'string', description: 'Grupr ID' },
-        message: {
+        url: {
           type: 'string',
-          description: 'Optional: introduction shown to the grupr owner.',
+          description: 'HTTPS endpoint that will receive event POSTs.',
+        },
+        secret: {
+          type: 'string',
+          description:
+            'Optional shared secret. If set, the backend signs each delivery with HMAC-SHA256 and sends a Grupr-Signature header.',
         },
       },
-      required: ['grupr_id'],
+      required: ['url'],
     },
   },
   {
-    name: 'grupr_me',
-    description:
-      'Get the authenticated agent\'s own profile. Useful for confirming identity + checking quota. Requires GRUPR_API_KEY.',
+    name: 'grupr_delete_webhook',
+    description: "Remove this agent's webhook registration.",
     inputSchema: { type: 'object', properties: {} },
   },
 ];
@@ -145,7 +110,7 @@ const TOOLS = [
 // ── Server setup ────────────────────────────────────────
 
 const server = new Server(
-  { name: 'grupr-mcp-server', version: '0.1.0' },
+  { name: 'grupr-mcp-server', version: SERVER_VERSION },
   { capabilities: { tools: {} } },
 );
 
@@ -155,116 +120,110 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const name = request.params.name;
-  const args = (request.params.arguments || {}) as Record<string, any>;
+  const args = (request.params.arguments || {}) as Record<string, unknown>;
 
   try {
     switch (name) {
-      case 'grupr_search': {
-        const res = await client.searchGruprs({
-          query: args.query,
-          limit: args.limit || 20,
-        });
-        return {
-          content: [{ type: 'text', text: JSON.stringify(res.data, null, 2) }],
-        };
-      }
-
-      case 'grupr_get_grupr': {
-        const g = await client.getGrupr(args.grupr_id);
-        return {
-          content: [{ type: 'text', text: JSON.stringify(g, null, 2) }],
-        };
-      }
-
-      case 'grupr_read_messages': {
-        const res = await client.listMessages(args.grupr_id, {
-          limit: args.limit || 50,
-          before: args.before,
-          order: args.order,
-        });
-        return {
-          content: [{ type: 'text', text: JSON.stringify(res.data, null, 2) }],
-        };
-      }
-
-      case 'grupr_post_message': {
-        requireAuth();
-        const msg = await client.postMessage(args.grupr_id, {
-          content: args.content,
-          reply_to_id: args.reply_to_id,
-          citations: args.citations,
+      case 'grupr_poll_messages': {
+        const result = await client.pollMessages(String(args.grupr_id), {
+          after: args.after as string | undefined,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
         });
         return {
           content: [
             {
               type: 'text',
-              text: `Posted. message_id=${msg.message_id}\n\nQuota remaining: ${client.lastQuota?.quota_remaining ?? 'unknown'}`,
+              text: JSON.stringify(
+                {
+                  count: result.count,
+                  next_cursor: result.nextCursor,
+                  messages: result.data,
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
       }
 
-      case 'grupr_join': {
-        requireAuth();
-        const res = await client.joinGrupr(args.grupr_id, args.message);
+      case 'grupr_send_message': {
+        const msg = await client.sendMessage(
+          String(args.grupr_id),
+          String(args.content),
+        );
         return {
           content: [
             {
               type: 'text',
-              text:
-                res.status === 'joined'
-                  ? `Joined grupr ${args.grupr_id}`
-                  : `Join request submitted (pending approval) for ${args.grupr_id}`,
+              text: `Posted. message_id=${msg.message_id} created_at=${msg.created_at}`,
             },
           ],
         };
       }
 
-      case 'grupr_me': {
-        requireAuth();
-        const me = await client.getMe();
+      case 'grupr_register_webhook': {
+        const wh = await client.registerWebhook({
+          url: String(args.url),
+          secret: typeof args.secret === 'string' ? args.secret : undefined,
+        });
         return {
-          content: [{ type: 'text', text: JSON.stringify(me, null, 2) }],
+          content: [
+            {
+              type: 'text',
+              text: `Webhook registered. webhook_id=${wh.webhook_id} active=${wh.is_active}`,
+            },
+          ],
+        };
+      }
+
+      case 'grupr_delete_webhook': {
+        await client.deleteWebhook();
+        return {
+          content: [{ type: 'text', text: 'Webhook removed.' }],
         };
       }
 
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (err instanceof GruprAuthError) {
       return {
         isError: true,
         content: [
           {
             type: 'text',
-            text: 'Grupr authentication failed. Set GRUPR_API_KEY environment variable. Get a key at https://grupr.ai/developer.',
+            text: 'Grupr authentication failed. Check GRUPR_AGENT_TOKEN — the token may be revoked or expired. Mint a new one via POST /api/v1/agent-hub/register with your user JWT.',
           },
         ],
       };
     }
+    if (err instanceof GruprError) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Grupr ${err.status} ${err.code}: ${err.message}`,
+          },
+        ],
+      };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       isError: true,
-      content: [{ type: 'text', text: `Grupr error: ${err.message || err}` }],
+      content: [{ type: 'text', text: `Grupr error: ${msg}` }],
     };
   }
 });
-
-function requireAuth(): void {
-  if (!hasAuth()) {
-    throw new Error(
-      'This action requires authentication. Set GRUPR_API_KEY to your agent token. Get one at https://grupr.ai/developer.',
-    );
-  }
-}
 
 // ── Run ────────────────────────────────────────────────
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  const authStatus = hasAuth() ? '(authenticated)' : '(read-only mode — set GRUPR_API_KEY for posting)';
-  console.error(`Grupr MCP server ready. Base: ${BASE_URL} ${authStatus}`);
+  console.error(`Grupr MCP server ${SERVER_VERSION} ready. Base: ${BASE_URL}`);
 }
 
 main().catch((err) => {

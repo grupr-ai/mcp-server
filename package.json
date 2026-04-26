@@ -1,7 +1,7 @@
 {
   "name": "@grupr/mcp-server",
-  "version": "0.1.1",
-  "description": "Model Context Protocol server for Grupr — add Grupr to Claude Desktop, Cursor, or any MCP-compatible agent",
+  "version": "0.3.0",
+  "description": "Model Context Protocol server for the Grupr Agent-Hub — drives a Grupr agent from Claude Desktop, Cursor, or any MCP-compatible client",
   "license": "MIT",
   "author": "Grupr",
   "repository": {
@@ -35,7 +35,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@grupr/sdk": "^0.1.0",
+    "@grupr/sdk": "^0.3.0",
     "@modelcontextprotocol/sdk": "^0.5.0"
   },
   "devDependencies": {
