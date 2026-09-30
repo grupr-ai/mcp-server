@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.4.0';
+const SERVER_VERSION = '0.5.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -149,7 +149,124 @@ const TOOLS = [
     description: "Remove this agent's webhook registration.",
     inputSchema: { type: 'object', properties: {} },
   },
+  // ── Workspace (AgentOS, D-144) ─────────────────────────
+  {
+    name: 'grupr_workspace_info',
+    description:
+      "This agent's persistent workspace: a Linux sandbox that keeps its files between calls and pauses when idle. " +
+      'Returns its state (none / running / paused / lost), root path (/home/user), last use and run count. ' +
+      'The workspace is created on the first command or file operation.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'grupr_workspace_run',
+    description:
+      "Run a shell command in this agent's workspace. EVERY command needs a human decision first: an approval card " +
+      'appears in the room you name in grupr_id (and on the owner\'s Grupr dashboard); the call blocks up to ~2 minutes ' +
+      'for Approve/Deny. Approved → the command runs and you get exit_code, stdout, stderr. Denied → you get the reason; ' +
+      'do not retry the same command, say so in the room. No answer in time → the request is cancelled; ask in the room, then retry. ' +
+      'Standing permissions the owner has granted for this agent auto-approve (auto_approved: true). ' +
+      'Commands run under /bin/sh in /home/user by default; files persist between calls; the sandbox pauses after ~5 idle minutes ' +
+      'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cmd: { type: 'string', description: 'Shell command line (sh -c). Keep it to one purpose per call — that is what the human approves.' },
+        cwd: { type: 'string', description: 'Working directory inside /home/user. Default /home/user.' },
+        grupr_id: { type: 'string', description: 'UUID of the room the approval should appear in. Always pass the room you are working in.' },
+        timeout_seconds: { type: 'number', description: 'Wall-clock cap for the command (default 60, max 300).' },
+      },
+      required: ['cmd'],
+    },
+  },
+  {
+    name: 'grupr_workspace_files',
+    description: 'List one directory of the workspace (name, type, size, modified). Paths are confined to /home/user.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Directory to list. Default /home/user.' } },
+    },
+  },
+  {
+    name: 'grupr_workspace_read',
+    description:
+      'Read a file from the workspace. Text comes back as text; binary or oversized content comes back base64-encoded with a note. Files up to 10 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Absolute path under /home/user, or relative to it.' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'grupr_workspace_write',
+    description:
+      'Write a text file into the workspace (parent directories are created). No approval is needed to write files; running them is what gets approved.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path under /home/user, or relative to it.' },
+        content: { type: 'string', description: 'File contents (UTF-8).' },
+      },
+      required: ['path', 'content'],
+    },
+  },
 ];
+
+// ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
+
+class HubError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public approvalId?: string,
+  ) {
+    super(message);
+  }
+}
+
+async function hubFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${AGENT_TOKEN}`,
+    'User-Agent': `grupr-mcp-server/${SERVER_VERSION}`,
+    ...((init.headers as Record<string, string>) || {}),
+  };
+  return fetch(`${BASE_URL}${path}`, { ...init, headers });
+}
+
+async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await hubFetch(path, init);
+  const text = await res.text();
+  let body: any = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    const e = body?.errors?.[0];
+    throw new HubError(
+      res.status,
+      e?.code || 'error',
+      e?.message || body?.error || `HTTP ${res.status}`,
+      res.headers.get('x-approval-id') || undefined,
+    );
+  }
+  return (body?.data ?? body) as T;
+}
+
+function textOrBase64(buf: Buffer): { text?: string; base64?: string; note?: string } {
+  const isText = !buf.subarray(0, 8000).includes(0);
+  if (isText && buf.length <= 200 * 1024) {
+    return { text: buf.toString('utf8') };
+  }
+  return {
+    base64: buf.toString('base64'),
+    note: isText
+      ? 'Text file over 200 KB returned as base64.'
+      : 'Binary content returned as base64.',
+  };
+}
 
 // ── Real-time wait ──────────────────────────────────────
 //
@@ -347,10 +464,85 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'grupr_workspace_info': {
+        const info = await hubJSON<Record<string, unknown>>('/workspace');
+        return { content: [{ type: 'text', text: JSON.stringify(info, null, 2) }] };
+      }
+
+      case 'grupr_workspace_run': {
+        const res = await hubJSON<Record<string, unknown>>('/workspace/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cmd: String(args.cmd),
+            cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
+            grupr_id: typeof args.grupr_id === 'string' ? args.grupr_id : undefined,
+            timeout_seconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
+          }),
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+      }
+
+      case 'grupr_workspace_files': {
+        const p = typeof args.path === 'string' && args.path ? args.path : '/home/user';
+        const res = await hubFetch(`/workspace/files?path=${encodeURIComponent(p)}`);
+        const body: any = await res.json().catch(() => null);
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ path: body?.meta?.path ?? p, entries: body?.data ?? [] }, null, 2) },
+          ],
+        };
+      }
+
+      case 'grupr_workspace_read': {
+        const p = String(args.path);
+        const res = await hubFetch(`/workspace/file?path=${encodeURIComponent(p)}`);
+        if (!res.ok) {
+          const body: any = await res.json().catch(() => null);
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        return { content: [{ type: 'text', text: JSON.stringify({ path: p, size: buf.length, ...textOrBase64(buf) }, null, 2) }] };
+      }
+
+      case 'grupr_workspace_write': {
+        const p = String(args.path);
+        const res = await hubJSON<Record<string, unknown>>(`/workspace/file?path=${encodeURIComponent(p)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: String(args.content ?? ''),
+        });
+        return { content: [{ type: 'text', text: `Wrote ${res.size ?? '?'} bytes to ${res.path ?? p}.` }] };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (err: unknown) {
+    if (err instanceof HubError) {
+      const hint =
+        err.code === 'command_denied'
+          ? ' The human said no — do not retry this command; explain in the room instead.'
+          : err.code === 'approval_timeout'
+            ? ' Nobody decided in time and the request was cancelled. Ask in the room, then call again.'
+            : err.status === 503
+              ? ' Workspaces are not enabled on this Grupr server.'
+              : '';
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: `Grupr ${err.status} ${err.code}: ${err.message}.${hint}${err.approvalId ? ` (approval ${err.approvalId})` : ''}`,
+          },
+        ],
+      };
+    }
     if (err instanceof GruprAuthError) {
       return {
         isError: true,
