@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.5.0';
+const SERVER_VERSION = '0.6.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -220,6 +220,63 @@ const TOOLS = [
         content: { type: 'string', description: 'File contents (UTF-8).' },
       },
       required: ['path', 'content'],
+    },
+  },
+  // ── Room Files (shared per-room store, D-144 inc. 3) ──
+  {
+    name: 'grupr_room_files',
+    description:
+      "List a grupr's shared Files: the durable store every member of the room sees (humans upload, agents publish). " +
+      'Each entry has file_id, name (a path like reports/q3.md), size, content_type, version, who added it and when. ' +
+      'The agent must be assigned to the grupr.',
+    inputSchema: {
+      type: 'object',
+      properties: { grupr_id: { type: 'string', description: 'The grupr (room) id.' } },
+      required: ['grupr_id'],
+    },
+  },
+  {
+    name: 'grupr_room_file_read',
+    description:
+      "Read one of a grupr's shared Files by file_id or name. Text comes back as text (up to 200 KB), anything else as base64. " +
+      'To work on a file in the workspace instead, use grupr_workspace_fetch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id.' },
+        file: { type: 'string', description: 'file_id or the name shown by grupr_room_files.' },
+      },
+      required: ['grupr_id', 'file'],
+    },
+  },
+  {
+    name: 'grupr_workspace_publish',
+    description:
+      "Copy a file from this agent's workspace into a grupr's shared Files so every member can download it. " +
+      'Same name replaces the previous version. The room is told, as this agent. No approval is needed: publishing is a file write, not a command.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) to publish into; the agent must be assigned to it.' },
+        path: { type: 'string', description: 'Workspace path of the file (absolute under /home/user, or relative to it).' },
+        name: { type: 'string', description: 'Name inside the room, e.g. reports/q3.md. Defaults to the file name.' },
+      },
+      required: ['grupr_id', 'path'],
+    },
+  },
+  {
+    name: 'grupr_workspace_fetch',
+    description:
+      "Copy one of a grupr's shared Files into this agent's workspace. Default destination is /home/user/rooms/<grupr_id>/<name>; " +
+      'pass path to choose another (a trailing slash means a directory).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id.' },
+        file: { type: 'string', description: 'file_id or the name shown by grupr_room_files.' },
+        path: { type: 'string', description: 'Destination in the workspace (optional).' },
+      },
+      required: ['grupr_id', 'file'],
     },
   },
 ];
@@ -525,6 +582,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const buf = Buffer.from(await res.arrayBuffer());
         return { content: [{ type: 'text', text: JSON.stringify({ path: p, size: buf.length, ...textOrBase64(buf) }, null, 2) }] };
+      }
+
+      case 'grupr_room_files': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const res = await hubFetch(`/grups/${gid}/files`);
+        const body: any = await res.json().catch(() => null);
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                { files: body?.data ?? [], used_bytes: body?.meta?.used_bytes, quota_bytes: body?.meta?.quota_bytes },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case 'grupr_room_file_read': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const ref = String(args.file);
+        const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+        const res = await hubFetch(isId ? `/grups/${gid}/files/${ref}` : `/grups/${gid}/file?name=${encodeURIComponent(ref)}`);
+        if (!res.ok) {
+          const body: any = await res.json().catch(() => null);
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                { file: ref, size: buf.length, content_type: res.headers.get('content-type') || undefined, ...textOrBase64(buf) },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case 'grupr_workspace_publish': {
+        const f = await hubJSON<Record<string, unknown>>('/workspace/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grupr_id: String(args.grupr_id),
+            path: String(args.path),
+            name: typeof args.name === 'string' && args.name ? args.name : undefined,
+          }),
+        });
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Published ${f.name ?? '?'} (${f.size ?? '?'} bytes, v${f.version ?? 1}) to the room's Files. file_id ${f.file_id ?? '?'}.`,
+            },
+          ],
+        };
+      }
+
+      case 'grupr_workspace_fetch': {
+        const ref = String(args.file);
+        const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+        const r = await hubJSON<Record<string, unknown>>('/workspace/fetch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grupr_id: String(args.grupr_id),
+            file_id: isId ? ref : undefined,
+            name: isId ? undefined : ref,
+            path: typeof args.path === 'string' && args.path ? args.path : undefined,
+          }),
+        });
+        return { content: [{ type: 'text', text: `Fetched ${r.name ?? ref} (${r.size ?? '?'} bytes) into ${r.path ?? '?'}.` }] };
       }
 
       case 'grupr_workspace_write': {
