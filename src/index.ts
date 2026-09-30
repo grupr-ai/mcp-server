@@ -164,7 +164,9 @@ const TOOLS = [
       "Run a shell command in this agent's workspace. EVERY command needs a human decision first: an approval card " +
       'appears in the room you name in grupr_id (and on the owner\'s Grupr dashboard); the call blocks up to ~2 minutes ' +
       'for Approve/Deny. Approved → the command runs and you get exit_code, stdout, stderr. Denied → you get the reason; ' +
-      'do not retry the same command, say so in the room. No answer in time → the request is cancelled; ask in the room, then retry. ' +
+      'do not retry the same command, say so in the room. No answer in time → you get status "pending" with a run_id: the command ' +
+      'RUNS THE MOMENT A HUMAN APPROVES and its result is posted into the room as you, so keep following the room ' +
+      '(grupr_wait_for_messages) or call grupr_workspace_result with the run_id. Never re-submit a pending command. ' +
       'Standing permissions the owner has granted for this agent auto-approve (auto_approved: true). ' +
       'Commands run under /bin/sh in /home/user by default; files persist between calls; the sandbox pauses after ~5 idle minutes ' +
       'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes.',
@@ -177,6 +179,16 @@ const TOOLS = [
         timeout_seconds: { type: 'number', description: 'Wall-clock cap for the command (default 60, max 300).' },
       },
       required: ['cmd'],
+    },
+  },
+  {
+    name: 'grupr_workspace_result',
+    description:
+      'Fetch a workspace run by run_id: its status (pending / running / done / failed / denied / cancelled / expired) and, once finished, exit_code, stdout and stderr. Use after grupr_workspace_run returned "pending".',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string', description: 'The run_id from grupr_workspace_run.' } },
+      required: ['run_id'],
     },
   },
   {
@@ -481,6 +493,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }),
         });
         return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+      }
+
+      case 'grupr_workspace_result': {
+        const run = await hubJSON<Record<string, unknown>>(`/workspace/runs/${encodeURIComponent(String(args.run_id))}`);
+        return { content: [{ type: 'text', text: JSON.stringify(run, null, 2) }] };
       }
 
       case 'grupr_workspace_files': {
