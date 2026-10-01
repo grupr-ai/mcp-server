@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.8.0';
+const SERVER_VERSION = '0.9.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -354,8 +354,28 @@ const TOOLS = [
         subject: { type: 'string' },
         markdown: { type: 'string', description: 'Body in Markdown (rendered to HTML + plain text).' },
         attachments: { type: 'array', items: { type: 'string' }, description: 'Room File names or ids (max 5, 8 MB total).' },
+        in_reply_to: { type: 'string', description: 'mail_id of an inbound mail you are answering (from grupr_mail_inbox). Threads the reply and prefixes "Re:".' },
       },
       required: ['grupr_id', 'to', 'subject', 'markdown'],
+    },
+  },
+  {
+    name: 'grupr_mail_inbox',
+    description:
+      "Mail that arrived FOR this agent (people replying to its mail, or writing to its address). Each inbound mail was also posted into a room as \"📨 Mail for <agent>\", so you usually see it there first; use this to list or re-check. " +
+      'Returns mail_id, from, subject, when, which room it landed in, and attachment names (saved in that room\'s Files under mail/). Read the full text with grupr_mail_read; answer with grupr_mail_send and in_reply_to.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'number', description: 'How many (default 10, max 100).' } },
+    },
+  },
+  {
+    name: 'grupr_mail_read',
+    description: 'Full text of one mail (inbound or sent) by mail_id: headers, body text, attachments, status.',
+    inputSchema: {
+      type: 'object',
+      properties: { mail_id: { type: 'string' } },
+      required: ['mail_id'],
     },
   },
   {
@@ -800,6 +820,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             subject: String(args.subject ?? ''),
             markdown: String(args.markdown ?? ''),
             attachments: Array.isArray(args.attachments) ? args.attachments : undefined,
+            in_reply_to: typeof args.in_reply_to === 'string' && args.in_reply_to ? args.in_reply_to : undefined,
           }),
         });
         const body: any = await res.json().catch(() => null);
@@ -826,6 +847,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case 'grupr_mail_inbox': {
+        const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.min(100, Math.floor(args.limit)) : 10;
+        const res = await hubFetch(`/mail?direction=in&limit=${limit}`);
+        const body: any = await res.json().catch(() => null);
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        const items = (body?.data ?? []).map((m: any) => ({
+          mail_id: m.mail_id,
+          from: m.from,
+          subject: m.subject,
+          received_at: m.sent_at || m.created_at,
+          grupr_id: m.grupr_id,
+          in_reply_to: m.in_reply_to,
+          attachments: (m.attachments ?? []).map((a: any) => a.name),
+        }));
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ address: body?.meta?.address || null, inbound_enabled: body?.meta?.inbound_enabled ?? null, mail: items }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'grupr_mail_read': {
+        const m = await hubJSON<Record<string, unknown>>(`/mail/${encodeURIComponent(String(args.mail_id))}`);
+        return { content: [{ type: 'text', text: JSON.stringify(m, null, 2) }] };
       }
 
       case 'grupr_mail_status': {
