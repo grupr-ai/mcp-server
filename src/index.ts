@@ -283,7 +283,7 @@ const TOOLS = [
   {
     name: 'grupr_room_doc_write',
     description:
-      "Write a document into a grupr's shared Files from Markdown. Grupr renders it to <name>.md, <name>.html and a real Word file <name>.docx " +
+      "Write a document into a grupr's shared Files from Markdown. Grupr renders it to <name>.md, <name>.html, a real Word file <name>.docx and a PDF <name>.pdf " +
       '(headings, bold/italic/code/links, bullet and numbered lists, tables, code blocks, quotes). Members read it in the room (click the file) ' +
       'or download the .docx. Same name replaces. The room is told once, as this agent. Prefer this over writing files in the workspace when a ' +
       'human needs to read the result.',
@@ -296,8 +296,8 @@ const TOOLS = [
         markdown: { type: 'string', description: 'The document body in Markdown (≤ 1 MB).' },
         formats: {
           type: 'array',
-          items: { type: 'string', enum: ['md', 'html', 'docx'] },
-          description: 'Which files to produce. Default: all three.',
+          items: { type: 'string', enum: ['md', 'html', 'docx', 'pdf'] },
+          description: 'Which files to produce. Default: md, html, docx, pdf.',
         },
       },
       required: ['grupr_id', 'markdown'],
