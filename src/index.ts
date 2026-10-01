@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.7.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -277,6 +277,62 @@ const TOOLS = [
         path: { type: 'string', description: 'Destination in the workspace (optional).' },
       },
       required: ['grupr_id', 'file'],
+    },
+  },
+  // ── Documents (D-144 inc. 4) ──
+  {
+    name: 'grupr_room_doc_write',
+    description:
+      "Write a document into a grupr's shared Files from Markdown. Grupr renders it to <name>.md, <name>.html and a real Word file <name>.docx " +
+      '(headings, bold/italic/code/links, bullet and numbered lists, tables, code blocks, quotes). Members read it in the room (click the file) ' +
+      'or download the .docx. Same name replaces. The room is told once, as this agent. Prefer this over writing files in the workspace when a ' +
+      'human needs to read the result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id; the agent must be assigned to it.' },
+        name: { type: 'string', description: 'Document name without extension, folders allowed (e.g. reports/q3-review). Defaults to a slug of the title / first heading.' },
+        title: { type: 'string', description: 'Document title (defaults to the first # heading).' },
+        markdown: { type: 'string', description: 'The document body in Markdown (≤ 1 MB).' },
+        formats: {
+          type: 'array',
+          items: { type: 'string', enum: ['md', 'html', 'docx'] },
+          description: 'Which files to produce. Default: all three.',
+        },
+      },
+      required: ['grupr_id', 'markdown'],
+    },
+  },
+  {
+    name: 'grupr_room_sheet_write',
+    description:
+      "Write a spreadsheet into a grupr's shared Files from a table spec: Grupr produces <name>.xlsx (bold frozen header, autofilter, numbers as " +
+      'numbers) and <name>.csv of the first sheet. Up to 20 sheets / 256 columns / 200k cells. Same name replaces. The room is told once, as this agent.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id; the agent must be assigned to it.' },
+        name: { type: 'string', description: 'Workbook name without extension, folders allowed. Defaults to the first sheet name.' },
+        sheets: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Sheet tab name (≤ 31 chars).' },
+              columns: { type: 'array', items: { type: 'string' }, description: 'Header row.' },
+              rows: {
+                type: 'array',
+                items: { type: 'array', items: {} },
+                description: 'Data rows; values are numbers, strings, booleans or null. Numeric strings become numbers.',
+              },
+            },
+            required: ['name', 'columns'],
+          },
+        },
+        formats: { type: 'array', items: { type: 'string', enum: ['xlsx', 'csv'] }, description: 'Default: both.' },
+      },
+      required: ['grupr_id', 'sheets'],
     },
   },
 ];
@@ -665,6 +721,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }),
         });
         return { content: [{ type: 'text', text: `Fetched ${r.name ?? ref} (${r.size ?? '?'} bytes) into ${r.path ?? '?'}.` }] };
+      }
+
+      case 'grupr_room_doc_write': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const r = await hubJSON<{ base?: string; title?: string; files?: { name: string; size: number; version: number; file_id: string }[] }>(
+          `/grups/${gid}/documents`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: typeof args.name === 'string' ? args.name : undefined,
+              title: typeof args.title === 'string' ? args.title : undefined,
+              markdown: String(args.markdown ?? ''),
+              formats: Array.isArray(args.formats) ? args.formats : undefined,
+            }),
+          },
+        );
+        const files = (r.files ?? []).map((f) => `${f.name} (${f.size} B, v${f.version}, ${f.file_id})`).join('; ');
+        return { content: [{ type: 'text', text: `Wrote ${r.base ?? '?'} to the room's Files: ${files}.` }] };
+      }
+
+      case 'grupr_room_sheet_write': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const r = await hubJSON<{ base?: string; files?: { name: string; size: number; version: number; file_id: string }[] }>(`/grups/${gid}/sheets`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: typeof args.name === 'string' ? args.name : undefined,
+            sheets: args.sheets,
+            formats: Array.isArray(args.formats) ? args.formats : undefined,
+          }),
+        });
+        const files = (r.files ?? []).map((f) => `${f.name} (${f.size} B, v${f.version}, ${f.file_id})`).join('; ');
+        return { content: [{ type: 'text', text: `Wrote ${r.base ?? '?'} to the room's Files: ${files}.` }] };
       }
 
       case 'grupr_workspace_write': {
