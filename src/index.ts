@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -333,6 +333,38 @@ const TOOLS = [
         formats: { type: 'array', items: { type: 'string', enum: ['xlsx', 'csv'] }, description: 'Default: both.' },
       },
       required: ['grupr_id', 'sheets'],
+    },
+  },
+  // ── Mail (D-144 inc. 5, outbound) ──
+  {
+    name: 'grupr_mail_send',
+    description:
+      'Email someone on behalf of the room. NOTHING is sent until a human approves: an approval card with the recipients, subject, ' +
+      'preview and attachments appears in the grupr you name. The call waits up to ~2 minutes; if approved it sends and returns ' +
+      '"sent", if denied you get the reason (do not retry), otherwise it returns "pending" and the mail goes out the moment someone ' +
+      'approves (receipt posted in the room; check with grupr_mail_status). The message leaves as "<agent name> via Grupr" from the ' +
+      'shared agent address, with a footer naming the agent and its owner. Attachments must be files in that grupr\'s shared Files ' +
+      '(by name or file_id) — write them first with grupr_room_doc_write / grupr_room_sheet_write / grupr_workspace_publish.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) this mail is sent from; the agent must be assigned to it.' },
+        to: { type: 'array', items: { type: 'string' }, description: 'Recipients ("Name <addr>" or bare addresses). Max 10 with cc.' },
+        cc: { type: 'array', items: { type: 'string' } },
+        subject: { type: 'string' },
+        markdown: { type: 'string', description: 'Body in Markdown (rendered to HTML + plain text).' },
+        attachments: { type: 'array', items: { type: 'string' }, description: 'Room File names or ids (max 5, 8 MB total).' },
+      },
+      required: ['grupr_id', 'to', 'subject', 'markdown'],
+    },
+  },
+  {
+    name: 'grupr_mail_status',
+    description: 'Status of a mail this agent asked to send: pending / sending / sent / failed / denied / cancelled / expired, with the provider id or error.',
+    inputSchema: {
+      type: 'object',
+      properties: { mail_id: { type: 'string' } },
+      required: ['mail_id'],
     },
   },
 ];
@@ -757,6 +789,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `Wrote ${r.base ?? '?'} to the room's Files: ${files}.` }] };
       }
 
+      case 'grupr_mail_send': {
+        const res = await hubFetch('/mail/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grupr_id: String(args.grupr_id),
+            to: Array.isArray(args.to) ? args.to : [String(args.to ?? '')],
+            cc: Array.isArray(args.cc) ? args.cc : undefined,
+            subject: String(args.subject ?? ''),
+            markdown: String(args.markdown ?? ''),
+            attachments: Array.isArray(args.attachments) ? args.attachments : undefined,
+          }),
+        });
+        const body: any = await res.json().catch(() => null);
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        const d = body?.data ?? body;
+        if (res.status === 202 || d?.status === 'pending') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Mail ${d?.mail_id ?? '?'} is awaiting a human decision (approval ${d?.approval_id ?? '?'}). It sends the moment someone approves and the receipt is posted in the room. Do not re-send; check grupr_mail_status or watch the room.`,
+              },
+            ],
+          };
+        }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Mail ${d?.mail_id ?? '?'} ${d?.status ?? '?'}${d?.provider_id ? ` (provider id ${d.provider_id})` : ''}${d?.auto_approved ? ' — auto-approved by a standing rule' : ''}. To: ${(d?.to ?? []).join(', ')}. Subject: ${d?.subject ?? ''}.`,
+            },
+          ],
+        };
+      }
+
+      case 'grupr_mail_status': {
+        const m = await hubJSON<Record<string, unknown>>(`/mail/${encodeURIComponent(String(args.mail_id))}`);
+        return { content: [{ type: 'text', text: JSON.stringify(m, null, 2) }] };
+      }
+
       case 'grupr_workspace_write': {
         const p = String(args.path);
         const res = await hubJSON<Record<string, unknown>>(`/workspace/file?path=${encodeURIComponent(p)}`, {
@@ -773,8 +849,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (err: unknown) {
     if (err instanceof HubError) {
       const hint =
-        err.code === 'command_denied'
-          ? ' The human said no — do not retry this command; explain in the room instead.'
+        err.code === 'command_denied' || err.code === 'mail_denied'
+          ? ' The human said no — do not retry; explain in the room instead.'
           : err.code === 'approval_timeout'
             ? ' Nobody decided in time and the request was cancelled. Ask in the room, then call again.'
             : err.status === 503
