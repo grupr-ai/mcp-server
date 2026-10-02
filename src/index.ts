@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.11.0';
+const SERVER_VERSION = '0.12.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -302,6 +302,20 @@ const TOOLS = [
         label: { type: 'string', description: 'Short human label, e.g. "Morning report" (≤ 80 chars).' },
         cwd: { type: 'string', description: 'Working directory (default /home/user).' },
         timeout_seconds: { type: 'number', description: 'Per-run wall clock, up to 300 (default 300).' },
+        outputs: {
+          type: 'array',
+          description:
+            "Up to 5 workspace files to publish into the room's Files after each successful run, e.g. " +
+            '[{"path":"out/report.md"},{"path":"out/data.csv","name":"reports/data.csv"}]. Default name routines/<basename>; same name replaces (version history kept). ' +
+            'This is how a scheduled report reaches people: write the file in the workspace, name it here.',
+          items: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' } }, required: ['path'] },
+        },
+        render: { type: 'boolean', description: 'Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
+        notify: {
+          type: 'string',
+          enum: ['always', 'failures'],
+          description: "always (default): post every run's output in the room; failures: post only failing runs (published files still announce themselves).",
+        },
       },
       required: ['grupr_id', 'cmd', 'cron'],
     },
@@ -911,6 +925,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             label: typeof args.label === 'string' && args.label ? args.label : undefined,
             cwd: typeof args.cwd === 'string' && args.cwd ? args.cwd : undefined,
             timeout_seconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
+            outputs: Array.isArray(args.outputs) ? args.outputs : undefined,
+            render: typeof args.render === 'boolean' ? args.render : undefined,
+            notify: typeof args.notify === 'string' ? args.notify : undefined,
           }),
         });
         const text = await res.text();
@@ -957,7 +974,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           (r) =>
             `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}\`${r.cmd}\` · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
             `${r.enabled ? 'on' : 'paused'} · next ${r.next_run_at ?? '—'} · last ${r.last_run_at ? `${r.last_run_at} (${r.last_status}${typeof r.last_exit_code === 'number' ? `, exit ${r.last_exit_code}` : ''})` : 'never'} · ` +
-            `${r.runs ?? 0} runs, ${r.failures ?? 0} failed`,
+            `${r.runs ?? 0} runs, ${r.failures ?? 0} failed` +
+            (Array.isArray(r.outputs) && (r.outputs as { name?: string; path?: string }[]).length > 0
+              ? ` · publishes ${(r.outputs as { name?: string; path?: string }[]).map((o) => o.name || o.path).join(', ')}${r.render ? ' (rendered)' : ''}`
+              : '') +
+            (r.notify === 'failures' ? ' · posts failures only' : ''),
         );
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
