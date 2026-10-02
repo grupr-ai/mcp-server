@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.9.0';
+const SERVER_VERSION = '0.10.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -238,8 +238,9 @@ const TOOLS = [
   {
     name: 'grupr_room_file_read',
     description:
-      "Read one of a grupr's shared Files by file_id or name. Text comes back as text (up to 200 KB), anything else as base64. " +
-      'To work on a file in the workspace instead, use grupr_workspace_fetch.',
+      "Read one of a grupr's shared Files by file_id or name, as text you can reason about: Markdown, text, CSV, and the text of Word (.docx), " +
+      'PowerPoint (.pptx) and PDF files; Excel (.xlsx) comes back sheet by sheet as CSV. Images and other binaries return a short description ' +
+      '(or base64 when nothing better exists). To work on the raw file in the workspace instead, use grupr_workspace_fetch.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -430,6 +431,70 @@ async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
     );
   }
   return (body?.data ?? body) as T;
+}
+
+// previewToText flattens the api's structured preview into text an agent can
+// read. Returns null when the raw download is the better answer.
+function previewToText(p: any): string | null {
+  const head = `${p.name ?? ''} (${p.content_type ?? ''}, ${p.size ?? '?'} B)`;
+  const csv = (rows: string[][]) =>
+    rows
+      .map((r) => r.map((c) => (/[",\n]/.test(c ?? '') ? `"${String(c ?? '').replace(/"/g, '""')}"` : (c ?? ''))).join(','))
+      .join('\n');
+  switch (p.kind) {
+    case 'markdown': {
+      const src = p.source ? ` — text extracted from ${String(p.source).toUpperCase()}; formatting approximate` : '';
+      const body = typeof p.text === 'string' && p.text ? p.text : blocksToText(p.blocks ?? []);
+      return `${head}${src}${p.truncated ? ' [truncated]' : ''}\n\n${body}`;
+    }
+    case 'table':
+      return `${head}${p.truncated ? ' [truncated]' : ''}\n\n${csv([p.header ?? [], ...(p.rows ?? [])])}`;
+    case 'workbook': {
+      const parts = (p.sheets ?? []).map(
+        (sh: any) => `### ${sh.name}${sh.truncated ? ' [truncated]' : ''}\n${csv([sh.header ?? [], ...(sh.rows ?? [])])}`,
+      );
+      return `${head} — ${(p.sheets ?? []).length} sheet(s)\n\n${parts.join('\n\n')}`;
+    }
+    case 'text':
+      return `${head}${p.truncated ? ' [truncated]' : ''}\n\n${p.text ?? ''}`;
+    case 'pdf':
+      return typeof p.text === 'string' && p.text
+        ? `${head} — text extracted from PDF; layout not preserved\n\n${p.text}`
+        : `${head} — a PDF whose text could not be extracted (scanned or custom fonts). Download it with grupr_workspace_fetch if you need the bytes.`;
+    case 'image':
+      return `${head} — an image. Fetch it into the workspace with grupr_workspace_fetch to process it.`;
+    default:
+      return null;
+  }
+}
+
+function blocksToText(blocks: any[]): string {
+  const spans = (ss: any[]) => (ss ?? []).map((s) => (s.break ? '\n' : s.text ?? '')).join('');
+  const out: string[] = [];
+  for (const b of blocks) {
+    switch (b.kind) {
+      case 'heading':
+        out.push('#'.repeat(b.level ?? 1) + ' ' + spans(b.spans));
+        break;
+      case 'paragraph':
+      case 'quote':
+        out.push(spans(b.spans));
+        break;
+      case 'code':
+        out.push('```\n' + (b.text ?? '') + '\n```');
+        break;
+      case 'list':
+        out.push((b.items ?? []).map((it: any, i: number) => `${b.ordered ? i + 1 + '.' : '-'} ${spans(it.spans)}`).join('\n'));
+        break;
+      case 'table':
+        out.push([b.header ?? [], ...(b.rows ?? [])].map((r: any[]) => '| ' + r.map((c) => spans(c.spans)).join(' | ') + ' |').join('\n'));
+        break;
+      case 'hr':
+        out.push('---');
+        break;
+    }
+  }
+  return out.join('\n\n');
 }
 
 function textOrBase64(buf: Buffer): { text?: string; base64?: string; note?: string } {
@@ -718,6 +783,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const gid = encodeURIComponent(String(args.grupr_id));
         const ref = String(args.file);
         const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+        // Documents first: the api's preview carries extracted text for
+        // Word / PowerPoint / PDF, sheets for Excel, blocks for Markdown.
+        let fileId = isId ? ref : '';
+        if (!fileId) {
+          const lr = await hubFetch(`/grups/${gid}/files`);
+          const lb: any = await lr.json().catch(() => null);
+          const hit = (lb?.data ?? []).find((f: any) => f.name === ref || f.name === ref.replace(/^\/+/, ''));
+          if (hit) fileId = hit.file_id;
+        }
+        if (fileId) {
+          const pr = await hubFetch(`/grups/${gid}/files/${fileId}/preview`);
+          const pb: any = await pr.json().catch(() => null);
+          if (pr.ok && pb?.data) {
+            const rendered = previewToText(pb.data);
+            if (rendered !== null) {
+              return { content: [{ type: 'text', text: rendered }] };
+            }
+          }
+        }
         const res = await hubFetch(isId ? `/grups/${gid}/files/${ref}` : `/grups/${gid}/file?name=${encodeURIComponent(ref)}`);
         if (!res.ok) {
           const body: any = await res.json().catch(() => null);
