@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.10.0';
+const SERVER_VERSION = '0.11.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -278,6 +278,46 @@ const TOOLS = [
         path: { type: 'string', description: 'Destination in the workspace (optional).' },
       },
       required: ['grupr_id', 'file'],
+    },
+  },
+  // ── Routines (D-144 inc. 13) ──
+  {
+    name: 'grupr_workspace_schedule',
+    description:
+      "Propose a routine: one shell command that runs in this agent's workspace on a cron, with the result posted in the room each time. " +
+      "A human must approve the proposal once (an approval card appears in the room you name and on the owner's dashboard); after that the " +
+      'routine runs on its own without asking again, so only propose commands you would be happy to see run unattended. Destructive commands ' +
+      'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines. Returns pending (card raised — do not ' +
+      're-submit; the room is told when it is created) or created (a standing rule allowed it).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) the routine belongs to and posts into; the agent must be assigned to it.' },
+        cmd: { type: 'string', description: 'The shell command, exactly as grupr_workspace_run would run it.' },
+        cron: {
+          type: 'string',
+          description: 'Five-field cron (minute hour day-of-month month day-of-week), e.g. "0 8 * * 1-5" = weekdays 08:00; or @hourly / @daily / @weekly / @monthly.',
+        },
+        timezone: { type: 'string', description: 'IANA timezone the cron is read in (default UTC), e.g. America/New_York.' },
+        label: { type: 'string', description: 'Short human label, e.g. "Morning report" (≤ 80 chars).' },
+        cwd: { type: 'string', description: 'Working directory (default /home/user).' },
+        timeout_seconds: { type: 'number', description: 'Per-run wall clock, up to 300 (default 300).' },
+      },
+      required: ['grupr_id', 'cmd', 'cron'],
+    },
+  },
+  {
+    name: 'grupr_workspace_schedules',
+    description: "List this agent's routines: schedule, timezone, room, enabled, next and last run, run and failure counts.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'grupr_workspace_unschedule',
+    description: "Remove one of this agent's routines by schedule_id. The room is told. (Owners can also pause or remove routines from the agent page.)",
+    inputSchema: {
+      type: 'object',
+      properties: { schedule_id: { type: 'string' } },
+      required: ['schedule_id'],
     },
   },
   // ── Documents (D-144 inc. 4) ──
@@ -857,6 +897,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }),
         });
         return { content: [{ type: 'text', text: `Fetched ${r.name ?? ref} (${r.size ?? '?'} bytes) into ${r.path ?? '?'}.` }] };
+      }
+
+      case 'grupr_workspace_schedule': {
+        const res = await hubFetch('/workspace/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            grupr_id: String(args.grupr_id),
+            cmd: String(args.cmd),
+            cron: String(args.cron),
+            timezone: typeof args.timezone === 'string' && args.timezone ? args.timezone : undefined,
+            label: typeof args.label === 'string' && args.label ? args.label : undefined,
+            cwd: typeof args.cwd === 'string' && args.cwd ? args.cwd : undefined,
+            timeout_seconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
+          }),
+        });
+        const text = await res.text();
+        let body: any = null;
+        try {
+          body = text ? JSON.parse(text) : null;
+        } catch {
+          body = null;
+        }
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
+        }
+        const d = body?.data ?? {};
+        if (res.status === 202 || d.status === 'pending') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Routine proposed — approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
+                  'When someone approves, the routine is created and the room is told; if they deny, nothing is scheduled.',
+              },
+            ],
+          };
+        }
+        const sch = d.schedule ?? d;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Routine created (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.`,
+            },
+          ],
+        };
+      }
+
+      case 'grupr_workspace_schedules': {
+        const list = await hubJSON<Record<string, unknown>[]>('/workspace/schedules');
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'No routines. Propose one with grupr_workspace_schedule.' }] };
+        }
+        const lines = list.map(
+          (r) =>
+            `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}\`${r.cmd}\` · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
+            `${r.enabled ? 'on' : 'paused'} · next ${r.next_run_at ?? '—'} · last ${r.last_run_at ? `${r.last_run_at} (${r.last_status}${typeof r.last_exit_code === 'number' ? `, exit ${r.last_exit_code}` : ''})` : 'never'} · ` +
+            `${r.runs ?? 0} runs, ${r.failures ?? 0} failed`,
+        );
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      }
+
+      case 'grupr_workspace_unschedule': {
+        await hubJSON<Record<string, unknown>>(`/workspace/schedules/${encodeURIComponent(String(args.schedule_id))}`, { method: 'DELETE' });
+        return { content: [{ type: 'text', text: 'Routine removed; the room has been told.' }] };
       }
 
       case 'grupr_room_doc_write': {
