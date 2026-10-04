@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.13.0';
+const SERVER_VERSION = '0.14.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -334,6 +334,36 @@ const TOOLS = [
       type: 'object',
       properties: { schedule_id: { type: 'string' } },
       required: ['schedule_id'],
+    },
+  },
+  // ── Recipes (D-144 inc. 16–17) ──
+  {
+    name: 'grupr_workspace_recipes',
+    description:
+      'List the ready-made routines (recipes) this server offers: what each does, how often it runs, what it needs from you (parameters) and what it publishes. ' +
+      'Prefer a recipe over writing your own routine when one fits: its script is tested, quiet by default, and a person only has to approve it once.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'grupr_workspace_recipe',
+    description:
+      "Ask for a recipe to be installed for this agent: Grupr writes the recipe's script into the workspace and schedules it. A human must approve first " +
+      '(an approval card shows the recipe and exactly what it will check); nothing is installed until then. Returns pending (do not re-submit; the room is told when it is created) ' +
+      'or created (a standing rule allowed it). Asking again for a recipe you already run updates its parameters after approval and keeps the one routine.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        recipe_id: { type: 'string', description: 'From grupr_workspace_recipes, e.g. site-check, page-watch, workspace-report.' },
+        grupr_id: { type: 'string', description: 'The grupr (room) the routine belongs to and posts into; the agent must be assigned to it.' },
+        params: {
+          type: 'object',
+          description: 'The recipe parameters as strings, e.g. {"urls": "https://a.example\nhttps://b.example"} for site-check or {"url": "https://example.com/pricing"} for page-watch. http(s) URLs only.',
+          additionalProperties: { type: 'string' },
+        },
+        timezone: { type: 'string', description: 'IANA timezone for the schedule (default UTC).' },
+        cron: { type: 'string', description: "Optional five-field cron to replace the recipe's own schedule (minimum interval 5 minutes)." },
+      },
+      required: ['recipe_id', 'grupr_id'],
     },
   },
   // ── Documents (D-144 inc. 4) ──
@@ -988,6 +1018,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'grupr_workspace_unschedule': {
         await hubJSON<Record<string, unknown>>(`/workspace/schedules/${encodeURIComponent(String(args.schedule_id))}`, { method: 'DELETE' });
         return { content: [{ type: 'text', text: 'Routine removed; the room has been told.' }] };
+      }
+
+      case 'grupr_workspace_recipes': {
+        const list = await hubJSON<Record<string, unknown>[]>('/workspace/recipes');
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'This server offers no recipes.' }] };
+        }
+        const lines = list.map((r) => {
+          const params = Array.isArray(r.params) ? (r.params as { key?: string; label?: string; help?: string }[]) : [];
+          const outs = Array.isArray(r.outputs) ? (r.outputs as { name?: string; path?: string }[]) : [];
+          return (
+            `- ${r.id}: ${r.title} (${r.every}). ${r.summary}` +
+            (params.length ? ` Parameters: ${params.map((p) => `${p.key} (${p.label}${p.help ? `; ${p.help}` : ''})`).join(', ')}.` : ' No parameters.') +
+            (outs.length ? ` Publishes ${outs.map((o) => o.name || o.path).join(', ')}.` : '')
+          );
+        });
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      }
+
+      case 'grupr_workspace_recipe': {
+        const res = await hubFetch('/workspace/recipe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recipe_id: String(args.recipe_id),
+            grupr_id: String(args.grupr_id),
+            params: args.params && typeof args.params === 'object' ? args.params : undefined,
+            timezone: typeof args.timezone === 'string' && args.timezone ? args.timezone : undefined,
+            cron: typeof args.cron === 'string' && args.cron ? args.cron : undefined,
+          }),
+        });
+        const text = await res.text();
+        let body: any = null;
+        try {
+          body = text ? JSON.parse(text) : null;
+        } catch {
+          body = null;
+        }
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
+        }
+        const d = body?.data ?? {};
+        if (res.status === 202 || d.status === 'pending') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  `Recipe requested: approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
+                  'When someone approves, the script is installed, the routine is created and the room is told; if they deny, nothing is installed.',
+              },
+            ],
+          };
+        }
+        const sch = d.schedule ?? d;
+        return {
+          content: [{ type: 'text', text: `Recipe installed (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
+        };
       }
 
       case 'grupr_room_doc_write': {
