@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.12.0';
+const SERVER_VERSION = '0.13.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -313,8 +313,10 @@ const TOOLS = [
         render: { type: 'boolean', description: 'Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
         notify: {
           type: 'string',
-          enum: ['always', 'failures'],
-          description: "always (default): post every run's output in the room; failures: post only failing runs (published files still announce themselves).",
+          enum: ['always', 'failures', 'output'],
+          description:
+            "always (default): post every run's output in the room; failures: post only failing runs; output: post only when the run prints something or fails " +
+            '(like cron mail-on-output: write the script to stay silent unless there is news, and a silent run also publishes its files quietly).',
         },
       },
       required: ['grupr_id', 'cmd', 'cron'],
@@ -978,7 +980,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             (Array.isArray(r.outputs) && (r.outputs as { name?: string; path?: string }[]).length > 0
               ? ` · publishes ${(r.outputs as { name?: string; path?: string }[]).map((o) => o.name || o.path).join(', ')}${r.render ? ' (rendered)' : ''}`
               : '') +
-            (r.notify === 'failures' ? ' · posts failures only' : ''),
+            (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : ''),
         );
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
