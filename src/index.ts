@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.14.0';
+const SERVER_VERSION = '0.15.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -333,6 +333,20 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { schedule_id: { type: 'string' } },
+      required: ['schedule_id'],
+    },
+  },
+  {
+    name: 'grupr_workspace_schedule_runs',
+    description:
+      "What one of this agent's routines did on its recent firings: when, exit code, how long, an excerpt of the output, and what it published to the room's Files. " +
+      'Use it to check a routine is healthy before telling a person it is, or to see why it failed. Full output of one run: grupr_workspace_result with its run_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        schedule_id: { type: 'string', description: 'From grupr_workspace_schedules.' },
+        limit: { type: 'number', description: 'How many firings, newest first (default 10, max 100).' },
+      },
       required: ['schedule_id'],
     },
   },
@@ -1018,6 +1032,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'grupr_workspace_unschedule': {
         await hubJSON<Record<string, unknown>>(`/workspace/schedules/${encodeURIComponent(String(args.schedule_id))}`, { method: 'DELETE' });
         return { content: [{ type: 'text', text: 'Routine removed; the room has been told.' }] };
+      }
+
+      case 'grupr_workspace_schedule_runs': {
+        const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.min(Math.floor(args.limit), 100) : 10;
+        const list = await hubJSON<Record<string, unknown>[]>(`/workspace/schedules/${encodeURIComponent(String(args.schedule_id))}/runs?limit=${limit}`);
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'No firings recorded for this routine yet.' }] };
+        }
+        const lines = list.map((r) => {
+          const pub = Array.isArray(r.published) ? (r.published as { name?: string; error?: string; unchanged?: boolean }[]) : [];
+          const out = [r.stdout, r.stderr, r.error].filter((x) => typeof x === 'string' && x).join('\n').trim();
+          const first = out.split('\n').find((l) => l.trim()) ?? '';
+          return (
+            `- ${r.finished_at ?? r.created_at} · ${r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
+            (typeof r.wall_clock_ms === 'number' ? ` · ${r.wall_clock_ms} ms` : '') +
+            (pub.length ? ` · published ${pub.map((p) => (p.error ? `${p.name} FAILED (${p.error})` : `${p.name}${p.unchanged ? ' (unchanged)' : ''}`)).join(', ')}` : '') +
+            (first ? ` · ${first.slice(0, 160)}` : ' · no output') +
+            ` · run_id ${r.run_id}`
+          );
+        });
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
 
       case 'grupr_workspace_recipes': {
