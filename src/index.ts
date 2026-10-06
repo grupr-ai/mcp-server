@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.17.0';
+const SERVER_VERSION = '0.17.1';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -304,6 +304,25 @@ const TOOLS = [
         connection: { type: 'string', description: "Name of one of this agent's connections; the URL must be https on its host." },
       },
       required: ['url'],
+    },
+  },
+  {
+    name: 'grupr_workspace_connection_request',
+    description:
+      "Ask the owner for a connection you need: a credential for one host, stored by the owner and attached by Grupr to fetches on your behalf (you never see the value). " +
+      'Give the name you will use, the host, how the credential is sent (bearer, header with header_name, or basic) and why. The room you name is told; the owner adds the value on the agent page and the room is told when it is ready. ' +
+      'Asking again for the same name is harmless. At most 5 pending.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Lowercase letters, digits and dashes, e.g. github.' },
+        host: { type: 'string', description: 'The only host the credential will ever be sent to, e.g. api.github.com.' },
+        auth_type: { type: 'string', enum: ['bearer', 'header', 'basic'] },
+        header_name: { type: 'string', description: 'For auth_type header, e.g. X-Api-Key.' },
+        reason: { type: 'string', description: 'One line: what you will fetch with it (shown to the owner).' },
+        grupr_id: { type: 'string', description: 'The room to tell (optional; the agent must be in it).' },
+      },
+      required: ['name', 'host', 'auth_type'],
     },
   },
   {
@@ -1037,17 +1056,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `${head}. Body at ${r.path}; details in ${r.meta_path}.${r.truncated ? ' The body was cut at 5 MB.' : ''}` }] };
       }
 
+      case 'grupr_workspace_connection_request': {
+        const res = await hubFetch('/workspace/connections/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: String(args.name),
+            host: String(args.host),
+            auth_type: String(args.auth_type),
+            header_name: typeof args.header_name === 'string' ? args.header_name : undefined,
+            reason: typeof args.reason === 'string' ? args.reason : undefined,
+            grupr_id: typeof args.grupr_id === 'string' && args.grupr_id ? args.grupr_id : undefined,
+          }),
+        });
+        const text = await res.text();
+        let body: any = null;
+        try {
+          body = text ? JSON.parse(text) : null;
+        } catch {
+          body = null;
+        }
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
+        }
+        const r = body?.data ?? {};
+        return { content: [{ type: 'text', text: `${body?.meta?.created ? 'Asked' : 'Already asked'} for connection ${r.name} to ${r.host} (${r.auth_type}). ${body?.meta?.note ?? ''}`.trim() }] };
+      }
+
       case 'grupr_workspace_connections': {
-        const list = await hubJSON<any[]>('/workspace/connections');
-        if (!Array.isArray(list) || list.length === 0) {
-          return { content: [{ type: 'text', text: 'This agent has no connections. The owner adds them on the agent page (Connections).' }] };
+        const res = await hubFetch('/workspace/connections');
+        const text = await res.text();
+        let body: any = null;
+        try {
+          body = text ? JSON.parse(text) : null;
+        } catch {
+          body = null;
+        }
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
+        }
+        const list: any[] = Array.isArray(body?.data) ? body.data : [];
+        const pending: any[] = Array.isArray(body?.meta?.pending_requests) ? body.meta.pending_requests : [];
+        const asked = pending.length ? `\nAsked for, waiting for the owner: ${pending.map((p) => `${p.name} → ${p.host}`).join('; ')}` : '';
+        if (list.length === 0) {
+          return { content: [{ type: 'text', text: 'This agent has no connections. The owner adds them on the agent page (Connections); grupr_workspace_connection_request asks for one.' + asked }] };
         }
         const lines = list.map(
           (c) =>
             `- ${c.name} → ${c.host} (${c.auth_type}${c.agent_access ? ', agent may use' : ', routines only'})${c.note ? ` — ${c.note}` : ''}` +
             (c.auth_failures ? ` ⚠ refused ${c.auth_failures}× in a row (HTTP ${c.last_status}); the owner needs to rotate it` : ''),
         );
-        return { content: [{ type: 'text', text: `Connections (values are never shown):\n${lines.join('\n')}` }] };
+        return { content: [{ type: 'text', text: `Connections (values are never shown):\n${lines.join('\n')}${asked}` }] };
       }
 
       case 'grupr_workspace_schedule': {
