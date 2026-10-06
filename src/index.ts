@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.16.0';
+const SERVER_VERSION = '0.16.1';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -1015,7 +1015,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!Array.isArray(list) || list.length === 0) {
           return { content: [{ type: 'text', text: 'This agent has no connections. The owner adds them on the agent page (Connections).' }] };
         }
-        const lines = list.map((c) => `- ${c.name} → ${c.host} (${c.auth_type}${c.agent_access ? ', agent may use' : ', routines only'})${c.note ? ` — ${c.note}` : ''}`);
+        const lines = list.map(
+          (c) =>
+            `- ${c.name} → ${c.host} (${c.auth_type}${c.agent_access ? ', agent may use' : ', routines only'})${c.note ? ` — ${c.note}` : ''}` +
+            (c.auth_failures ? ` ⚠ refused ${c.auth_failures}× in a row (HTTP ${c.last_status}); the owner needs to rotate it` : ''),
+        );
         return { content: [{ type: 'text', text: `Connections (values are never shown):\n${lines.join('\n')}` }] };
       }
 
@@ -1105,11 +1109,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const lines = list.map((r) => {
           const pub = Array.isArray(r.published) ? (r.published as { name?: string; error?: string; unchanged?: boolean }[]) : [];
+          const ins = Array.isArray(r.inputs) ? (r.inputs as { url?: string; status?: number; ok?: boolean; error?: string; connection?: string }[]) : [];
           const out = [r.stdout, r.stderr, r.error].filter((x) => typeof x === 'string' && x).join('\n').trim();
           const first = out.split('\n').find((l) => l.trim()) ?? '';
           return (
             `- ${r.finished_at ?? r.created_at} · ${r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
             (typeof r.wall_clock_ms === 'number' ? ` · ${r.wall_clock_ms} ms` : '') +
+            (ins.length ? ` · fetched ${ins.map((i) => `${i.ok ? 'ok' : 'FAILED'}${i.status ? ` ${i.status}` : ''} ${i.url}${i.connection ? ` via ${i.connection}` : ''}${i.error ? ` (${i.error})` : ''}`).join('; ')}` : '') +
             (pub.length ? ` · published ${pub.map((p) => (p.error ? `${p.name} FAILED (${p.error})` : `${p.name}${p.unchanged ? ' (unchanged)' : ''}`)).join(', ')}` : '') +
             (first ? ` · ${first.slice(0, 160)}` : ' · no output') +
             ` · run_id ${r.run_id}`
