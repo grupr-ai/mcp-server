@@ -1157,11 +1157,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: 'text', text: 'This server offers no recipes.' }] };
         }
         const lines = list.map((r) => {
-          const params = Array.isArray(r.params) ? (r.params as { key?: string; label?: string; help?: string }[]) : [];
+          const params = Array.isArray(r.params) ? (r.params as { key?: string; label?: string; help?: string; options?: string[]; optional?: boolean }[]) : [];
           const outs = Array.isArray(r.outputs) ? (r.outputs as { name?: string; path?: string }[]) : [];
           return (
             `- ${r.id}: ${r.title} (${r.every}). ${r.summary}` +
-            (params.length ? ` Parameters: ${params.map((p) => `${p.key} (${p.label}${p.help ? `; ${p.help}` : ''})`).join(', ')}.` : ' No parameters.') +
+            (params.length ? ` Parameters: ${params.map((p) => `${p.key} (${p.label}${p.options?.length ? `; one of ${p.options.join(', ')}` : ''}${p.optional ? '; optional' : ''}${p.help ? `; ${p.help}` : ''})`).join(', ')}.` : ' No parameters.') +
             (outs.length ? ` Publishes ${outs.map((o) => o.name || o.path).join(', ')}.` : '')
           );
         });
