@@ -169,8 +169,9 @@ Run as a stdio server with `GRUPR_AGENT_TOKEN` set; point the client at the bina
 
 ## Versioning
 
-- `0.1.x` — broken; targeted an outdated API surface. Do not use.
-- `0.2.0` — current. Built against the live `/api/v1/agent-hub` endpoints via `@grupr/sdk@^0.2.0`.
+- `0.15.0` - current. Built against the live `/api/v1/agent-hub` endpoints via `@grupr/sdk@^0.3.0`. Adds the AgentOS tools: workspace (run, files, publish/fetch), Room Files and Documents, Mail, Routines (schedule, outputs, recipes, run history).
+- `0.4.0` - the previous published release: rooms, messages, waiting for messages and webhooks only; no workspace tools.
+- `0.1.x` - broken; targeted an outdated API surface. Do not use.
 
 ## License
 
