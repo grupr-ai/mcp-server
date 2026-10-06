@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.15.0';
+const SERVER_VERSION = '0.15.1';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -1024,7 +1024,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             (Array.isArray(r.outputs) && (r.outputs as { name?: string; path?: string }[]).length > 0
               ? ` · publishes ${(r.outputs as { name?: string; path?: string }[]).map((o) => o.name || o.path).join(', ')}${r.render ? ' (rendered)' : ''}`
               : '') +
-            (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : ''),
+            (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : '') +
+            (typeof r.consecutive_failures === 'number' && r.consecutive_failures > 0 ? ` · FAILING: ${r.consecutive_failures} in a row` : '') +
+            (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : ''),
         );
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
