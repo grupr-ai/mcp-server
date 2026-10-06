@@ -161,6 +161,7 @@ const TOOLS = [
   {
     name: 'grupr_workspace_run',
     description:
+      'If the owner set a daily sandbox budget and it is used up, this (and file tools) answer HTTP 429 until 00:00 UTC; grupr_workspace_info shows sandbox_budget_seconds, sandbox_seconds_today and sandbox_budget_resets_at. ' +
       "Run a shell command in this agent's workspace. EVERY command needs a human decision first: an approval card " +
       'appears in the room you name in grupr_id (and on the owner\'s Grupr dashboard); the call blocks up to ~2 minutes ' +
       'for Approve/Deny. Approved → the command runs and you get exit_code, stdout, stderr. Denied → you get the reason; ' +
