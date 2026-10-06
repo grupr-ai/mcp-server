@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.15.1';
+const SERVER_VERSION = '0.16.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -280,6 +280,31 @@ const TOOLS = [
       required: ['grupr_id', 'file'],
     },
   },
+  // ── Connections (D-144 inc. 21) ──
+  {
+    name: 'grupr_workspace_download',
+    description:
+      "Have Grupr fetch a URL and write the response into this agent's workspace: the body at path, plus path.meta.json (status, bytes, ms, error). " +
+      'Name a connection to fetch with a credential the owner stored: Grupr attaches it and hands back only the response, so the credential never reaches you. ' +
+      'A connection works here only if the owner opened it to the agent (grupr_workspace_connections shows which); otherwise use it from a routine input. ' +
+      'Public destinations only, GET, https with a connection, 5 MB.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Absolute http(s) URL.' },
+        path: { type: 'string', description: 'Destination file in the workspace (default downloads/<host>/<file>; a trailing slash means a directory).' },
+        connection: { type: 'string', description: "Name of one of this agent's connections; the URL must be https on its host." },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'grupr_workspace_connections',
+    description:
+      "List this agent's connections: name, host, how the credential is sent, and whether the agent may use it directly. Values are never shown. " +
+      'Use a name in grupr_workspace_download, or in a routine input ({"url","path","connection"}) when proposing a schedule.',
+    inputSchema: { type: 'object', properties: {} },
+  },
   // ── Routines (D-144 inc. 13) ──
   {
     name: 'grupr_workspace_schedule',
@@ -309,6 +334,14 @@ const TOOLS = [
             '[{"path":"out/report.md"},{"path":"out/data.csv","name":"reports/data.csv"}]. Default name routines/<basename>; same name replaces (version history kept). ' +
             'This is how a scheduled report reaches people: write the file in the workspace, name it here.',
           items: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' } }, required: ['path'] },
+        },
+        inputs: {
+          type: 'array',
+          description:
+            'Up to 10 URLs Grupr fetches before each run and writes into the workspace, e.g. [{"url":"https://api.example.com/status","path":"in/status.json","connection":"intranet"}]. ' +
+            'Each lands at path with a path.meta.json sidecar (status, bytes, ms, error) for the script to read. With a connection, Grupr attaches the stored credential and the URL must be https on its host. ' +
+            'This is how a routine reads a private API or page without the credential ever entering the workspace.',
+          items: { type: 'object', properties: { url: { type: 'string' }, path: { type: 'string' }, connection: { type: 'string' } }, required: ['url', 'path'] },
         },
         render: { type: 'boolean', description: 'Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
         notify: {
@@ -371,7 +404,8 @@ const TOOLS = [
         grupr_id: { type: 'string', description: 'The grupr (room) the routine belongs to and posts into; the agent must be assigned to it.' },
         params: {
           type: 'object',
-          description: 'The recipe parameters as strings, e.g. {"urls": "https://a.example\nhttps://b.example"} for site-check or {"url": "https://example.com/pricing"} for page-watch. http(s) URLs only.',
+          description: 'The recipe parameters as strings, e.g. {"urls": "https://a.example\nhttps://b.example"} for site-check or {"url": "https://example.com/pricing"} for page-watch. http(s) URLs only. ' +
+            'site-check and page-watch also take an optional "connection" (a name from grupr_workspace_connections): Grupr then fetches with that credential and the script reads what came back.',
           additionalProperties: { type: 'string' },
         },
         timezone: { type: 'string', description: 'IANA timezone for the schedule (default UTC).' },
@@ -959,6 +993,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: `Fetched ${r.name ?? ref} (${r.size ?? '?'} bytes) into ${r.path ?? '?'}.` }] };
       }
 
+      case 'grupr_workspace_download': {
+        const r = await hubJSON<Record<string, any>>('/workspace/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: String(args.url),
+            path: typeof args.path === 'string' && args.path ? args.path : undefined,
+            connection: typeof args.connection === 'string' && args.connection ? args.connection : undefined,
+          }),
+        });
+        const via = r.connection ? ` via connection ${r.connection}` : '';
+        const head = r.ok
+          ? `Fetched ${r.url}${via}: HTTP ${r.status}, ${r.bytes ?? 0} bytes in ${r.ms ?? 0} ms`
+          : `Fetched ${r.url}${via}: HTTP ${r.status}${r.error ? ` (${r.error})` : ''}`;
+        return { content: [{ type: 'text', text: `${head}. Body at ${r.path}; details in ${r.meta_path}.${r.truncated ? ' The body was cut at 5 MB.' : ''}` }] };
+      }
+
+      case 'grupr_workspace_connections': {
+        const list = await hubJSON<any[]>('/workspace/connections');
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'This agent has no connections. The owner adds them on the agent page (Connections).' }] };
+        }
+        const lines = list.map((c) => `- ${c.name} → ${c.host} (${c.auth_type}${c.agent_access ? ', agent may use' : ', routines only'})${c.note ? ` — ${c.note}` : ''}`);
+        return { content: [{ type: 'text', text: `Connections (values are never shown):\n${lines.join('\n')}` }] };
+      }
+
       case 'grupr_workspace_schedule': {
         const res = await hubFetch('/workspace/schedule', {
           method: 'POST',
@@ -972,6 +1032,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             cwd: typeof args.cwd === 'string' && args.cwd ? args.cwd : undefined,
             timeout_seconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
             outputs: Array.isArray(args.outputs) ? args.outputs : undefined,
+            inputs: Array.isArray(args.inputs) ? args.inputs : undefined,
             render: typeof args.render === 'boolean' ? args.render : undefined,
             notify: typeof args.notify === 'string' ? args.notify : undefined,
           }),
