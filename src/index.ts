@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.16.1';
+const SERVER_VERSION = '0.17.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -280,6 +280,13 @@ const TOOLS = [
       },
       required: ['grupr_id', 'file'],
     },
+  },
+  {
+    name: 'grupr_workspace_summary',
+    description:
+      "What this agent did recently, in numbers: sandbox time, runs (failed, denied), routine firings (failed, routines failing now), connection uses (refused), files published, " +
+      'and whether the daily sandbox budget was reached. Use it to report on yourself honestly or to notice a routine that keeps failing. The owner sees the same on the agent page and in a Monday email.',
+    inputSchema: { type: 'object', properties: { days: { type: 'number', description: 'Window in days, 1-90 (default 7).' } } },
   },
   // ── Connections (D-144 inc. 21) ──
   {
@@ -992,6 +999,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }),
         });
         return { content: [{ type: 'text', text: `Fetched ${r.name ?? ref} (${r.size ?? '?'} bytes) into ${r.path ?? '?'}.` }] };
+      }
+
+      case 'grupr_workspace_summary': {
+        const days = typeof args.days === 'number' && args.days > 0 ? Math.min(90, Math.floor(args.days)) : 7;
+        const s = await hubJSON<Record<string, any>>(`/workspace/summary?days=${days}`);
+        const min = (sec: number) => {
+          const m = Math.round((sec ?? 0) / 60);
+          return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+        };
+        const lines = [
+          `Last ${days} day${days === 1 ? '' : 's'} (${String(s.since).slice(0, 10)} to ${String(s.until).slice(0, 10)}):`,
+          `- sandbox time: ${min(s.sandbox_seconds)} in ${s.sandbox_sessions} session${s.sandbox_sessions === 1 ? '' : 's'}`,
+          `- runs: ${s.runs}${s.runs_failed ? ` (${s.runs_failed} failed)` : ''}${s.runs_denied ? ` (${s.runs_denied} denied)` : ''}`,
+          `- routine firings: ${s.firings}${s.firings_failed ? ` (${s.firings_failed} failed)` : ''}; routines active: ${s.routines_active}${s.routines_failing ? `, failing now: ${s.routines_failing}` : ''}${s.routines_paused_self ? `, paused themselves: ${s.routines_paused_self}` : ''}`,
+          `- connection uses: ${s.connection_uses}${s.connection_refused ? ` (${s.connection_refused} refused)` : ''} across ${s.connections} connection${s.connections === 1 ? '' : 's'}`,
+          `- files published: ${s.files_published}`,
+          typeof s.budget_seconds === 'number' ? `- daily sandbox budget: ${min(s.budget_seconds)}${s.budget_hit ? ' — reached in this window' : ' — not reached'}` : '- daily sandbox budget: none',
+        ];
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
 
       case 'grupr_workspace_download': {
