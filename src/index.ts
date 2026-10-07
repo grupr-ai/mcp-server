@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.17.1';
+const SERVER_VERSION = '0.17.2';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -320,7 +320,13 @@ const TOOLS = [
         auth_type: { type: 'string', enum: ['bearer', 'header', 'basic'] },
         header_name: { type: 'string', description: 'For auth_type header, e.g. X-Api-Key.' },
         reason: { type: 'string', description: 'One line: what you will fetch with it (shown to the owner).' },
-        grupr_id: { type: 'string', description: 'The room to tell (optional; the agent must be in it).' },
+        grupr_id: { type: 'string', description: 'The room to tell (optional; the agent must be in it). Required with then_recipe.' },
+        then_recipe: {
+          type: 'string',
+          description:
+            'Optional plan: the recipe you will run through this connection once it exists (one that takes a connection: api-watch, site-check, page-watch; see grupr_workspace_recipes). Its URLs must be on the host. Validated now; the owner sees it on the request and chooses to install it when adding the value. The routine is then the owner\'s.',
+        },
+        then_params: { type: 'object', description: "The recipe's parameters (not connection; that is this request).", additionalProperties: { type: 'string' } },
       },
       required: ['name', 'host', 'auth_type'],
     },
@@ -1067,6 +1073,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             header_name: typeof args.header_name === 'string' ? args.header_name : undefined,
             reason: typeof args.reason === 'string' ? args.reason : undefined,
             grupr_id: typeof args.grupr_id === 'string' && args.grupr_id ? args.grupr_id : undefined,
+            plan:
+              typeof args.then_recipe === 'string' && args.then_recipe
+                ? { recipe: args.then_recipe, params: args.then_params && typeof args.then_params === 'object' ? args.then_params : {} }
+                : undefined,
           }),
         });
         const text = await res.text();
@@ -1081,7 +1091,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
         }
         const r = body?.data ?? {};
-        return { content: [{ type: 'text', text: `${body?.meta?.created ? 'Asked' : 'Already asked'} for connection ${r.name} to ${r.host} (${r.auth_type}). ${body?.meta?.note ?? ''}`.trim() }] };
+        return { content: [{ type: 'text', text: `${body?.meta?.created ? 'Asked' : 'Already asked'} for connection ${r.name} to ${r.host} (${r.auth_type}).${r.plan ? ` Plan: ${r.plan.summary ?? r.plan.recipe}.` : ''} ${body?.meta?.note ?? ''}`.trim() }] };
       }
 
       case 'grupr_workspace_connections': {
@@ -1099,7 +1109,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const list: any[] = Array.isArray(body?.data) ? body.data : [];
         const pending: any[] = Array.isArray(body?.meta?.pending_requests) ? body.meta.pending_requests : [];
-        const asked = pending.length ? `\nAsked for, waiting for the owner: ${pending.map((p) => `${p.name} → ${p.host}`).join('; ')}` : '';
+        const asked = pending.length ? `\nAsked for, waiting for the owner: ${pending.map((p) => `${p.name} → ${p.host}${p.plan ? ` (then ${p.plan.summary ?? p.plan.recipe})` : ''}`).join('; ')}` : '';
         if (list.length === 0) {
           return { content: [{ type: 'text', text: 'This agent has no connections. The owner adds them on the agent page (Connections); grupr_workspace_connection_request asks for one.' + asked }] };
         }
