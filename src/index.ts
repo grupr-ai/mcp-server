@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.17.2';
+const SERVER_VERSION = '0.17.3';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -429,7 +429,8 @@ const TOOLS = [
     description:
       "Ask for a recipe to be installed for this agent: Grupr writes the recipe's script into the workspace and schedules it. A human must approve first " +
       '(an approval card shows the recipe and exactly what it will check); nothing is installed until then. Returns pending (do not re-submit; the room is told when it is created) ' +
-      'or created (a standing rule allowed it). Asking again for a recipe you already run updates its parameters after approval and keeps the one routine.',
+      'or created (a standing rule allowed it). Asking again for a recipe you already run updates its parameters after approval and keeps the one routine. ' +
+      'If params.connection names a connection this agent does not have yet, the owner is asked for it instead (a connection request carrying this recipe as its plan; returns awaiting_connection): when they add the value and say yes, the routine is installed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1263,6 +1264,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
         }
         const d = body?.data ?? {};
+        if (d.status === 'awaiting_connection') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  `No connection named ${d.connection ?? '?'} yet: the owner has been asked for one (to ${d.host ?? '?'}; request ${d.request_id ?? '?'}) with this recipe as the plan. ` +
+                  'When they add the value and say yes, the routine is installed and the room is told. Do not re-submit; grupr_workspace_connections shows when it is ready.',
+              },
+            ],
+          };
+        }
         if (res.status === 202 || d.status === 'pending') {
           return {
             content: [
