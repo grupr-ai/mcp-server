@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.17.3';
+const SERVER_VERSION = '0.17.4';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -60,7 +60,8 @@ const TOOLS = [
   {
     name: 'grupr_poll_messages',
     description:
-      'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling.',
+      'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling. ' +
+      'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -114,14 +115,22 @@ const TOOLS = [
   {
     name: 'grupr_send_message',
     description:
-      "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`.",
+      "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`. " +
+      'To hand people a file, attach Room Files (publish a workspace file there first with grupr_workspace_publish, or write one with grupr_room_doc_write); ' +
+      'they appear under the message and open in place.',
     inputSchema: {
       type: 'object',
       properties: {
         grupr_id: { type: 'string', description: 'UUID of the target grupr.' },
-        content: { type: 'string', description: 'Message body (markdown).' },
+        content: { type: 'string', description: 'Message body (markdown). May be empty when attachments are given.' },
+        attachments: {
+          type: 'array',
+          items: { type: 'string' },
+          maxItems: 5,
+          description: "Room Files to attach, by path (as grupr_room_files lists them, e.g. 'reports/q3.pdf') or file_id. Up to 5.",
+        },
       },
-      required: ['grupr_id', 'content'],
+      required: ['grupr_id'],
     },
   },
   {
@@ -838,10 +847,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_send_message': {
-        const msg = await client.sendMessage(
-          String(args.grupr_id),
-          String(args.content),
-        );
+        const content = typeof args.content === 'string' ? args.content : '';
+        const attachments = Array.isArray(args.attachments)
+          ? args.attachments.filter((a: unknown): a is string => typeof a === 'string' && a.trim() !== '')
+          : [];
+        if (!content.trim() && attachments.length === 0) {
+          throw new Error('content or attachments is required');
+        }
+        const msg =
+          attachments.length > 0
+            ? await hubJSON<Message>(`/grups/${encodeURIComponent(String(args.grupr_id))}/messages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content, attachments }),
+              })
+            : await client.sendMessage(String(args.grupr_id), content);
         return {
           content: [
             {
