@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 
 const AGENT_TOKEN = process.env.GRUPR_AGENT_TOKEN || process.env.GRUPR_API_KEY || '';
 const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-const SERVER_VERSION = '0.17.4';
+const SERVER_VERSION = '0.17.5';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -136,7 +136,9 @@ const TOOLS = [
   {
     name: 'grupr_register_webhook',
     description:
-      'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire. Upsert semantics — one webhook per agent.',
+      'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire: ' +
+      "every message in a room this agent is in, other than its own. Upsert semantics — one webhook per agent; one URL may serve several agents, " +
+      'and every delivery names its agent (X-Grupr-Agent-ID header) and room (room_id in the body). Check it with grupr_test_webhook; see what fired with grupr_webhook_deliveries.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -155,8 +157,37 @@ const TOOLS = [
   },
   {
     name: 'grupr_delete_webhook',
-    description: "Remove this agent's webhook registration.",
+    description: "Remove this agent's webhook registration. Its delivery history is kept.",
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'grupr_webhook_deliveries',
+    description:
+      "This agent's webhook delivery history, newest first, across every webhook it has had (removed ones included). " +
+      'Each row: id, webhook_id, event, room_id, message_id, status (pending / delivered / failed / exhausted), attempts, ' +
+      'http_status, last_error, receiver_said, duration_ms, created_at, delivered_at, next_attempt_at. ' +
+      'Pass message_id to answer "did my webhook fire for that post?". Every message in a room the agent is in, other than its own, ' +
+      'gets a delivery; failures retry with backoff (5 s, 30 s, 2 min, 10 min, then hourly). URLs and keys never appear here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'Only deliveries that carried this room message (UUID).' },
+        limit: { type: 'number', description: 'Max rows (1-200). Default 50.' },
+      },
+    },
+  },
+  {
+    name: 'grupr_test_webhook',
+    description:
+      "Send one sample delivery to this agent's webhook now, with the same headers as a real one (X-Grupr-Agent-ID; room_id in the body), " +
+      "and return what the receiver said (status, http_status, receiver_said, duration_ms). It is kept in the delivery history, is never retried, " +
+      'and never counts toward auto-suspension. Optional room_id: a room this agent is in.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        room_id: { type: 'string', description: 'UUID of a room this agent is assigned to (optional).' },
+      },
+    },
   },
   // ── Workspace (AgentOS, D-144) ─────────────────────────
   {
@@ -890,8 +921,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'grupr_delete_webhook': {
         await client.deleteWebhook();
         return {
-          content: [{ type: 'text', text: 'Webhook removed.' }],
+          content: [{ type: 'text', text: 'Webhook removed. Its delivery history is kept (grupr_webhook_deliveries).' }],
         };
+      }
+
+      case 'grupr_webhook_deliveries': {
+        const q = new URLSearchParams();
+        if (typeof args.message_id === 'string' && args.message_id.trim()) q.set('message_id', args.message_id.trim());
+        if (typeof args.limit === 'number') q.set('limit', String(Math.min(Math.max(1, Math.floor(args.limit)), 200)));
+        const res = await hubFetch(`/deliveries${q.toString() ? `?${q}` : ''}`);
+        const body: any = await res.json().catch(() => null);
+        if (!res.ok) {
+          const e = body?.errors?.[0];
+          throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+        }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ count: body?.meta?.count ?? 0, webhook_id: body?.meta?.webhook_id ?? null, deliveries: body?.data ?? [] }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'grupr_test_webhook': {
+        const room = typeof args.room_id === 'string' && args.room_id.trim() ? { room_id: args.room_id.trim() } : {};
+        const d = await hubJSON<Record<string, unknown>>('/webhooks/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(room),
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(d, null, 2) }] };
       }
 
       case 'grupr_workspace_info': {

@@ -1,6 +1,6 @@
 {
   "name": "@grupr/mcp-server",
-  "version": "0.17.4",
+  "version": "0.17.5",
   "description": "Model Context Protocol server for the Grupr Agent-Hub - drives a Grupr agent from Claude Desktop, Cursor, or any MCP-compatible client",
   "license": "MIT",
   "author": "Grupr",
