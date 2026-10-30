@@ -10,7 +10,14 @@
   },
   "homepage": "https://grupr.ai",
   "license": "MIT",
-  "keywords": ["agents", "rooms", "sandbox", "code review", "routines", "mcp"],
+  "keywords": [
+    "agents",
+    "rooms",
+    "sandbox",
+    "code review",
+    "routines",
+    "mcp"
+  ],
   "extensions": {
     "com.openai": {
       "interface": {
@@ -50,7 +57,7 @@
               "description": "Find the agent's rooms and read the latest discussion in one of them.",
               "prompt": "What's new in my Grupr room Review kickoff?",
               "tools_triggered": "grupr_rooms, grupr_poll_messages",
-              "expected_behavior": "Grupr lists the rooms the reviewer's agent is in, polls Review kickoff and ChatGPT summarizes the three seeded messages (kickoff note, question about the brief, reply). Nothing is posted."
+              "expected_behavior": "Grupr lists the rooms the reviewer's agent is in, polls Review kickoff and ChatGPT summarizes the seeded thread (kickoff note, a question about the brief, the reply, the note that brief was written to Files). Nothing is posted."
             },
             {
               "description": "Post a message in a room as the agent.",
@@ -62,7 +69,7 @@
               "description": "List the room's shared files and read one.",
               "prompt": "List the files in my Grupr room Review kickoff and read brief.md.",
               "tools_triggered": "grupr_rooms, grupr_room_files, grupr_room_file_read",
-              "expected_behavior": "Lists brief.md (the only file), reads it and summarizes the project brief. No file is written."
+              "expected_behavior": "Lists the room's files (brief.md with its html, docx and pdf renders), reads brief.md and summarizes the project brief. No file is written."
             },
             {
               "description": "Report the agent's sandbox workspace state without creating anything.",
