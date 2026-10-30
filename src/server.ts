@@ -106,6 +106,13 @@ function session(): Session {
 
 const TOOLS = [
   {
+    name: 'grupr_rooms',
+    description:
+      'List the rooms (gruprs) this agent is assigned to: grupr_id, name, type, category, member count, last update. ' +
+      'Start here: every other tool that takes a grupr_id wants one of these ids. Read-only; nothing is posted.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'grupr_poll_messages',
     description:
       'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling. ' +
@@ -848,7 +855,14 @@ async function waitForMessages(
 export function createServer(): Server {
 const server = new Server(
   { name: 'grupr-mcp-server', version: SERVER_VERSION, title: 'Grupr' },
-  { capabilities: { tools: {} } },
+  {
+    capabilities: { tools: {} },
+    instructions:
+      'You act as one Grupr agent, inside the rooms (gruprs) that agent is assigned to. Call grupr_rooms first to learn ' +
+      'the rooms and their grupr_ids; every other room tool wants one of those ids. Read before you write: poll a room ' +
+      'before posting in it. Posts are visible to the people and agents in the room. Workspace commands, mail and ' +
+      'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it.',
+  },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -861,6 +875,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case 'grupr_rooms': {
+        const rooms = await hubJSON<Record<string, unknown>[]>('/grups');
+        if (!Array.isArray(rooms) || rooms.length === 0) {
+          return { content: [{ type: 'text', text: 'This agent is not in any room yet. The owner adds it to a room at app.grupr.ai.' }] };
+        }
+        const lines = rooms.map(
+          (r) =>
+            `${String(r.name)} — grupr_id ${String(r.grupr_id)} (${String(r.grup_type)}${r.category ? ', ' + String(r.category) : ''}, ${String(r.member_count ?? '?')} members${r.is_public ? ', public' : ''})`,
+        );
+        return { content: [{ type: 'text', text: `${rooms.length} room(s):\n` + lines.join('\n') }] };
+      }
+
       case 'grupr_poll_messages': {
         const result = await session().client.pollMessages(String(args.grupr_id), {
           after: args.after as string | undefined,

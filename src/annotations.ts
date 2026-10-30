@@ -38,6 +38,7 @@ function write(title: string, opts: { destructive?: boolean; idempotent?: boolea
 }
 
 export const TOOL_META: Record<string, ToolMeta> = {
+  grupr_rooms: read('List my rooms'),
   grupr_poll_messages: read('Read room messages'),
   grupr_wait_for_messages: read('Wait for new messages'),
   grupr_send_message: write('Post a message'),
