@@ -28,7 +28,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { GruprClient, GruprAuthError, GruprError } from '@grupr/sdk';
 import type { Message } from '@grupr/sdk';
-import { TOOL_META } from './annotations.js';
+import { TOOL_DOCS, TOOL_META } from './annotations.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
 export const SERVER_VERSION = '0.18.0';
@@ -866,7 +866,11 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS.map((t) => ({ ...t, ...(TOOL_META[t.name] ?? {}) })),
+  tools: TOOLS.map((t) => ({
+    ...t,
+    ...(TOOL_META[t.name] ?? {}),
+    description: TOOL_DOCS[t.name] ? `${t.description} Docs: ${TOOL_DOCS[t.name]}` : t.description,
+  })),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {

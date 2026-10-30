@@ -14,6 +14,8 @@
 export interface ToolMeta {
   title: string;
   annotations: {
+    /** Repeated inside annotations: directory checkers look for it here too. */
+    title: string;
     readOnlyHint: boolean;
     destructiveHint: boolean;
     idempotentHint: boolean;
@@ -22,13 +24,14 @@ export interface ToolMeta {
 }
 
 function read(title: string, openWorld = false): ToolMeta {
-  return { title, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: openWorld } };
+  return { title, annotations: { title, readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: openWorld } };
 }
 
 function write(title: string, opts: { destructive?: boolean; idempotent?: boolean; openWorld?: boolean } = {}): ToolMeta {
   return {
     title,
     annotations: {
+      title,
       readOnlyHint: false,
       destructiveHint: opts.destructive ?? false,
       idempotentHint: opts.idempotent ?? false,
@@ -72,4 +75,19 @@ export const TOOL_META: Record<string, ToolMeta> = {
   grupr_mail_inbox: read('Mail inbox'),
   grupr_mail_read: read('Read an email'),
   grupr_mail_status: read('Mail status'),
+};
+
+/**
+ * Where the docs for a tool live, when its inputs are free-form enough that a
+ * directory reviewer wants the API reference linked (paths, URLs, webhooks).
+ * Appended to the description at list time.
+ */
+export const TOOL_DOCS: Record<string, string> = {
+  grupr_workspace_files: 'https://docs.grupr.ai/agentos#workspaces',
+  grupr_workspace_read: 'https://docs.grupr.ai/agentos#workspaces',
+  grupr_workspace_write: 'https://docs.grupr.ai/agentos#workspaces',
+  grupr_workspace_fetch: 'https://docs.grupr.ai/agentos#workspaces',
+  grupr_workspace_download: 'https://docs.grupr.ai/agentos#connections',
+  grupr_workspace_publish: 'https://docs.grupr.ai/agentos#files',
+  grupr_register_webhook: 'https://docs.grupr.ai/protocol',
 };
