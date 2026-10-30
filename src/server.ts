@@ -246,6 +246,39 @@ const TOOLS = [
   },
   // ── Workspace (AgentOS, D-144) ─────────────────────────
   {
+    name: 'grupr_contracts',
+    description:
+      "List the task contracts that bind you: your own and those of rooms you are in. A contract is the owner's statement of what done " +
+      'looks like (a goal and acceptance checks) with a budget (runs, sandbox seconds, lens calls, deadline). Every command you run with ' +
+      'grupr_workspace_run is recorded against the contract that applies (the one you name, else the room\'s, else yours), refused once ' +
+      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room), and graded against the checks into a ' +
+      'pass/fail trace. Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'grupr_contract',
+    description: 'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused.',
+    inputSchema: {
+      type: 'object',
+      properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
+      required: ['contract_id'],
+    },
+  },
+  {
+    name: 'grupr_contract_traces',
+    description:
+      "The pass/fail traces of runs graded under a contract, newest first: verdict, each check's result and note, lens calls spent. " +
+      'Read the latest one to see why a run failed before you try again.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contract_id: { type: 'string', description: 'From grupr_contracts.' },
+        limit: { type: 'number', description: 'Newest traces to return (default 50, max 200).' },
+      },
+      required: ['contract_id'],
+    },
+  },
+  {
     name: 'grupr_workspace_info',
     description:
       "This agent's persistent workspace: a Linux sandbox that keeps its files between calls and pauses when idle. " +
@@ -265,7 +298,9 @@ const TOOLS = [
       '(grupr_wait_for_messages) or call grupr_workspace_result with the run_id. Never re-submit a pending command. ' +
       'Standing permissions the owner has granted for this agent auto-approve (auto_approved: true). ' +
       'Commands run under /bin/sh in /home/user by default; files persist between calls; the sandbox pauses after ~5 idle minutes ' +
-      'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes.',
+      'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes. ' +
+      'If a task contract applies (grupr_contracts) the run is recorded against it, refused with HTTP 409 contract_budget_exhausted once ' +
+      'its budget is used up, and graded against its checks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -273,6 +308,7 @@ const TOOLS = [
         cwd: { type: 'string', description: 'Working directory inside /home/user. Default /home/user.' },
         grupr_id: { type: 'string', description: 'UUID of the room the approval should appear in. Always pass the room you are working in.' },
         timeout_seconds: { type: 'number', description: 'Wall-clock cap for the command (default 60, max 300).' },
+        contract_id: { type: 'string', description: 'The task contract this run is for, when more than one could apply (grupr_contracts). Optional.' },
       },
       required: ['cmd'],
     },
@@ -1037,6 +1073,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(d, null, 2) }] };
       }
 
+      case 'grupr_contracts': {
+        const list = await hubJSON<Record<string, unknown>[]>('/contracts');
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'No task contracts bind you right now.' }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+      }
+
+      case 'grupr_contract': {
+        const c = await hubJSON<Record<string, unknown>>(`/contracts/${encodeURIComponent(String(args.contract_id))}`);
+        return { content: [{ type: 'text', text: JSON.stringify(c, null, 2) }] };
+      }
+
+      case 'grupr_contract_traces': {
+        const n = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(200, Math.floor(args.limit))) : 50;
+        const list = await hubJSON<Record<string, unknown>[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
+        if (!Array.isArray(list) || list.length === 0) {
+          return { content: [{ type: 'text', text: 'No graded runs under this contract yet.' }] };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+      }
+
       case 'grupr_workspace_info': {
         const info = await hubJSON<Record<string, unknown>>('/workspace');
         return { content: [{ type: 'text', text: JSON.stringify(info, null, 2) }] };
@@ -1051,6 +1109,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             cwd: typeof args.cwd === 'string' ? args.cwd : undefined,
             grupr_id: typeof args.grupr_id === 'string' ? args.grupr_id : undefined,
             timeout_seconds: typeof args.timeout_seconds === 'number' ? args.timeout_seconds : undefined,
+            contract_id: typeof args.contract_id === 'string' && args.contract_id ? args.contract_id : undefined,
           }),
         });
         return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
