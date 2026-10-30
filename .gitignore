@@ -11,3 +11,6 @@ coverage/
 
 # npm pack output
 *.tgz
+
+# built listing packages
+directory/*.zip
