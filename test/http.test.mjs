@@ -88,7 +88,13 @@ before(async () => {
             {
               schedule_id: 's2', kind: 'command', cmd: 'python3 jobs/r.py', cron: '0 0 * * *', timezone: 'UTC', grupr_id: 'g1', enabled: false,
               paused_reason: 'script_changed', paused_detail: 'jobs/r.py', last_status: 'blocked', runs: 3, failures: 0,
+              script_hashes: [
+                { path: '/home/user/jobs/r.py', sha256: '1a2b3c4d5e6f', state: 'pinned' },
+                { path: '/home/user/jobs/later.py', state: 'absent' },
+                { path: 'x.py', state: 'unpinned', reason: 'the shell decides which file this is' },
+              ],
             },
+            { schedule_id: 's3', kind: 'command', cmd: 'date', cron: '@hourly', timezone: 'UTC', grupr_id: 'g1', enabled: true, runs: 0, failures: 0, script_hashes: [] },
           ],
         }),
       );
@@ -231,6 +237,9 @@ test('a prompt routine is proposed with an instruction and no command, and liste
   assert.ok(listed.includes('- s1 · instruction "Write the morning brief." · 0 8 * * 1-5 UTC'), listed);
   assert.ok(listed.includes('- s2 · `python3 jobs/r.py`'), listed);
   assert.ok(listed.includes('PAUSED: `jobs/r.py` changed since the routine was approved, so nothing runs until the owner re-approves it'), listed);
+  assert.ok(listed.includes('· pinned jobs/r.py (1a2b3c4d); absent now: jobs/later.py; not pinned: x.py (the shell decides which file this is)'), listed);
+  assert.ok(listed.includes('- s3 · `date` · @hourly UTC') && listed.includes('· Grupr cannot detect later changes to what this command runs'), listed);
+  assert.match(sched.description, /recorded as absent/);
 
   const runs = text(await client.callTool({ name: 'grupr_workspace_schedule_runs', arguments: { schedule_id: 's1' } }));
   assert.ok(runs.includes('· not delivered · No anthropic API key configured.'), runs);

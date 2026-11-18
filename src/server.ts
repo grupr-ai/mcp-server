@@ -481,8 +481,9 @@ const TOOLS = [
       "A human must approve the proposal once (an approval card appears in the room you name and on the owner's dashboard); after that the " +
       'routine runs on its own without asking again, so only propose what you would be happy to see run unattended. Destructive commands ' +
       'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines of both kinds together. ' +
-      'A command routine is held to the scripts its command names (python3 x.py, ./run.sh): they are recorded when it is approved, and if one changes or disappears the next firing ' +
-      'runs nothing and the routine pauses until the owner re-approves it. So tell the owner before you change a routine\'s script. ' +
+      'A command routine is held to the scripts its command names (python3 x.py, ./run.sh, after a literal cd): each is pinned by hash when it is approved, a file that does not exist yet is recorded as absent, ' +
+      'and a file Grupr cannot pin (too large, outside the workspace, a path the shell decides) is recorded as not pinned, which the approval card says. If a pinned file changes or disappears, or an absent one appears, the next firing ' +
+      'does not run the command and the routine pauses until the owner re-approves it. Files a script loads are not pinned. So tell the owner before you change a routine\'s script. ' +
       'Returns pending (card raised — do not re-submit; the room is told when it is created) or created (a standing rule allowed it).',
     inputSchema: {
       type: 'object',
@@ -908,6 +909,22 @@ export function routineWhat(r: Record<string, unknown>): string {
     return `instruction "${text.length > 160 ? `${text.slice(0, 159)}…` : text}"`;
   }
   return `\`${r.cmd}\``;
+}
+
+/** What a command routine is held to (api migration 130 script_hashes): pinned files with a short hash, absent files, files not pinned and why. */
+export function pinsWord(r: Record<string, unknown>): string {
+  if (r.kind === 'prompt') return '';
+  const pins = Array.isArray(r.script_hashes) ? (r.script_hashes as { path: string; sha256?: string; state?: string; reason?: string }[]) : [];
+  const rel = (p: string) => p.replace(/^\/home\/user\//, '');
+  const pinned = pins.filter((h) => h.state === 'pinned' || (!h.state && h.sha256)).map((h) => `${rel(h.path)} (${(h.sha256 ?? '').slice(0, 8)})`);
+  const absent = pins.filter((h) => h.state === 'absent').map((h) => rel(h.path));
+  const unpinned = pins.filter((h) => h.state === 'unpinned' || (!h.state && !h.sha256)).map((h) => `${rel(h.path)} (${h.reason || 'not pinned'})`);
+  const parts: string[] = [];
+  if (pinned.length) parts.push(`pinned ${pinned.join(', ')}`);
+  if (absent.length) parts.push(`absent now: ${absent.join(', ')}`);
+  if (unpinned.length) parts.push(`not pinned: ${unpinned.join(', ')}`);
+  if (!pinned.length && !absent.length) return ` · Grupr cannot detect later changes to what this command runs${parts.length ? ` (${parts.join('; ')})` : ''}`;
+  return ` · ${parts.join('; ')}`;
 }
 
 /**
@@ -1459,6 +1476,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : '') +
             (typeof r.consecutive_failures === 'number' && r.consecutive_failures > 0 ? ` · FAILING: ${r.consecutive_failures} in a row` : '') +
             (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : '') +
+            pinsWord(r) +
             (r.paused_reason === 'script_changed'
               ? ` · PAUSED: ${r.paused_detail ? `\`${r.paused_detail}\`` : 'a script'} changed since the routine was approved, so nothing runs until the owner re-approves it on the agent page`
               : ''),
