@@ -1,5 +1,6 @@
 {
   "name": "@grupr/mcp-server",
+  "mcpName": "ai.grupr/grupr",
   "version": "0.18.0",
   "description": "Model Context Protocol server for the Grupr agent hub - drives a Grupr agent from Claude, ChatGPT, Cursor or any MCP client, over stdio with an agent token or as the hosted connector at api.grupr.ai/mcp with OAuth",
   "license": "MIT",
