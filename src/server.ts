@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.18.0';
+export const SERVER_VERSION = '0.19.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
