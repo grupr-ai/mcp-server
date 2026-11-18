@@ -52,23 +52,53 @@ function roomRoute(req, url, body) {
     const after = url.searchParams.get('after');
     const ack = url.searchParams.get('ack') === '1';
     if (after === 'last_read' && room === 'room-new') {
-      // No read position yet: the default listing, newest first.
-      const newest = [...UNREAD].reverse();
-      return [200, { data: newest, meta: { count: 2, next_cursor: null, last_read_at: ack ? UNREAD[1].created_at : null, acked: ack } }];
+      // No read position yet: the agent's first read, the newest page oldest first, flagged.
+      return [
+        200,
+        {
+          data: UNREAD,
+          meta: {
+            count: 2,
+            next_cursor: null,
+            last_read_at: ack ? UNREAD[1].created_at : null,
+            last_read_message_id: ack ? UNREAD[1].message_id : null,
+            acked: ack,
+            first_read: true,
+            earlier_available: true,
+          },
+        },
+      ];
     }
     if (after === 'last_read' && room === 'room-wait') {
       // Unread, the newest of them a reply still being written.
       const data = [msg('w1', 5), msg('w2', 6, { is_streaming: true, content: '' })];
-      return [200, { data, meta: { count: 2, next_cursor: null, last_read_at: '2026-11-18T10:04:00Z', acked: false } }];
+      return [200, { data, meta: { count: 2, next_cursor: null, last_read_at: '2026-11-18T10:04:00Z', last_read_message_id: 'w0', acked: false, first_read: false } }];
     }
     if (after === 'last_read') {
-      return [200, { data: UNREAD, meta: { count: 2, next_cursor: null, last_read_at: ack ? UNREAD[1].created_at : POSITION, acked: ack } }];
+      return [
+        200,
+        {
+          data: UNREAD,
+          meta: {
+            count: 2,
+            next_cursor: null,
+            last_read_at: ack ? UNREAD[1].created_at : POSITION,
+            last_read_message_id: ack ? UNREAD[1].message_id : 'm1',
+            acked: ack,
+            first_read: false,
+          },
+        },
+      ];
     }
     // The explicit cursor: the old shape, no read position in meta.
     return [200, { data: UNREAD, meta: { count: 2, next_cursor: null } }];
   }
   if (what === 'read' && req.method === 'POST') {
-    return [200, { data: { grupr_id: room, agent_id: 'a1', last_read_at: body?.at ?? null, advanced: true } }];
+    // By message id, as the server sends it: the message's created_at comes back with it.
+    const known = { m2: '2026-11-18T10:01:00Z', m3: '2026-11-18T10:02:00Z', w1: '2026-11-18T10:05:00Z', w2: '2026-11-18T10:06:00Z' };
+    const id = body?.message_id;
+    const at = id && known[id] ? known[id] : null;
+    return [200, { data: { grupr_id: room, agent_id: 'a1', last_read_at: at, last_read_message_id: at ? id : null, advanced: at !== null } }];
   }
   if (what === 'brief' && req.method === 'GET') {
     const data = brief
@@ -274,7 +304,7 @@ test('the two new tools are listed with honest annotations, and poll and wait ar
 
   // The resume routine, in the instructions every client is given.
   const instructions = client.getInstructions() || '';
-  for (const want of ['grupr_room_brief_read', 'after: "last_read"', 'ack: true', 'grupr_room_brief_write', 'what is done and what is next']) {
+  for (const want of ['grupr_room_brief_read', 'after: "last_read"', 'ack: true', 'grupr_room_brief_write', 'what is done and what is next', 'newest page, oldest first']) {
     assert.ok(instructions.includes(want), `instructions mention ${want}: ${instructions}`);
   }
   await client.close();
@@ -302,14 +332,26 @@ test('poll from the read position: after last_read and ack reach the hub, and th
   const q = new URL(call.url, 'http://x').searchParams;
   assert.deepEqual([q.get('after'), q.get('ack'), q.get('limit')], ['last_read', '1', '20']);
 
-  // No read position yet: the default listing, and the caller is told so.
+  // No read position yet: the first read, the newest page oldest first, said so, with what the api reports.
   out = JSON.parse(textOf(await client.callTool({ name: 'grupr_poll_messages', arguments: { grupr_id: 'room-new', after: 'last_read' } })));
   assert.equal(out.last_read_at, null);
-  assert.deepEqual(out.messages.map((m) => m.message_id), ['m3', 'm2']);
-  assert.match(out.note, /no read position in this room yet/);
+  assert.equal(out.last_read_message_id, null);
+  assert.equal(out.first_read, true);
+  assert.equal(out.earlier_available, true);
+  assert.deepEqual(out.messages.map((m) => m.message_id), ['m2', 'm3'], 'oldest first, as the api sends them');
+  assert.match(out.note, /first read of this room/);
+  assert.match(out.note, /Older messages exist/);
   out = JSON.parse(textOf(await client.callTool({ name: 'grupr_poll_messages', arguments: { grupr_id: 'room-new', after: 'last_read', ack: true } })));
   assert.equal(out.acked, true);
-  assert.match(out.note, /had no read position before this call/);
+  assert.equal(out.first_read, true);
+  assert.equal(out.last_read_message_id, 'm3');
+  assert.match(out.note, /first read of this room/);
+  assert.match(out.note, /Marked read/);
+  // A positioned read is not a first read, and carries both halves of the position.
+  out = JSON.parse(textOf(await client.callTool({ name: 'grupr_poll_messages', arguments: { grupr_id: 'room-1', after: 'last_read' } })));
+  assert.equal(out.first_read, false);
+  assert.equal(out.last_read_message_id, 'm1');
+  assert.equal(out.earlier_available, undefined);
 
   // The explicit cursor is what it was: same call to the hub, same answer shape.
   const before = hubCalls.length;
@@ -343,9 +385,11 @@ test('wait from the read position returns what is unread at once, and ack stops 
   const marks = callsTo('/grups/room-wait/read');
   assert.equal(marks.length, 1);
   assert.equal(marks[0].method, 'POST');
-  assert.deepEqual(marks[0].body, { at: '2026-11-18T10:05:00Z' }, 'acknowledged through w1, not the reply still being written');
+  assert.deepEqual(marks[0].body, { message_id: 'w1' }, 'acknowledged through w1 (by id, the exact place in the order), not the reply still being written');
   assert.equal(out.acked, true);
   assert.equal(out.last_read_at, '2026-11-18T10:05:00Z');
+  assert.equal(out.last_read_message_id, 'w1');
+  assert.equal(out.first_read, false);
   await client.close();
 });
 

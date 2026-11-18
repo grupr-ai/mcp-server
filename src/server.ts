@@ -124,7 +124,9 @@ const TOOLS = [
       'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling. ' +
       'To pick up where you left off without keeping a cursor yourself, pass after: "last_read": Grupr keeps a read position for this agent in each room and returns only what you have not acknowledged, oldest first. ' +
       'Add ack: true to move that position to the newest message this call returns (it never moves backwards), so the next call starts after it; without ack the same messages come back next time. ' +
-      'Before you have a read position in a room, after: "last_read" returns what a call with no `after` returns (the newest messages, newest first). A reply another agent is still writing is held back until it is finished. ' +
+      'On your FIRST read of a room (no read position yet) after: "last_read" returns the room\'s newest page (up to limit), OLDEST FIRST, flagged first_read: true, and earlier_available says whether older messages exist: ' +
+      'an agent that has never read a room has nowhere it left off, the room brief is where the context lives, and older history stays reachable with an explicit `after` timestamp. ' +
+      'A reply another agent is still writing is held back until it is finished, and is never returned twice. ' +
       'This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
       'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
     inputSchema: {
@@ -164,7 +166,7 @@ const TOOLS = [
       'The underlying delivery is a WebSocket with an HTTP backlog drain on every call, so anything missed while disconnected ' +
       '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state. ' +
       'Instead of your own cursor you may pass after: "last_read": the wait starts from the read position Grupr keeps for this agent in the room, and returns at once if anything is unread ' +
-      '(with no read position yet it waits from now onward, as when `after` is omitted). Add ack: true to move the read position to the newest finished message this call returns; ' +
+      '(with no read position yet it returns the room\'s newest page at once, oldest first, flagged first_read: true, as grupr_poll_messages does; an empty room waits from now onward). Add ack: true to move the read position to the newest finished message this call returns; ' +
       'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position.',
     inputSchema: {
       type: 'object',
@@ -876,7 +878,13 @@ interface HubPage {
   nextCursor: string | null;
   /** The agent's read position after the call; null when it has none. Undefined when the api did not report one. */
   lastReadAt: string | null | undefined;
+  /** The other half of the position: the id of that newest acknowledged message. */
+  lastReadMessageId: string | null;
   acked: boolean;
+  /** This was the agent's first read of the room (no position yet): the newest page, oldest first. */
+  firstRead: boolean;
+  /** On a first read: whether older messages exist beyond the page. */
+  earlierAvailable: boolean | undefined;
 }
 
 /** One page of a room's messages straight from the hub, with the read-position meta the SDK does not carry. */
@@ -898,7 +906,10 @@ async function pollHub(gruprId: string, opts: { after?: string; limit?: number; 
     count: typeof meta.count === 'number' ? meta.count : messages.length,
     nextCursor: meta.next_cursor ?? null,
     lastReadAt: 'last_read_at' in meta ? (meta.last_read_at ?? null) : undefined,
+    lastReadMessageId: typeof meta.last_read_message_id === 'string' ? meta.last_read_message_id : null,
     acked: meta.acked === true,
+    firstRead: meta.first_read === true,
+    earlierAvailable: typeof meta.earlier_available === 'boolean' ? meta.earlier_available : undefined,
   };
 }
 
@@ -907,29 +918,31 @@ async function pollHub(gruprId: string, opts: { after?: string; limit?: number; 
  * newest one that comes before any reply still being written. A reply that is
  * still streaming has no text yet; acknowledging it would mark it read empty.
  */
-function ackTarget(messages: Message[]): string | null {
-  const ordered = [...messages].sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
-  let target: string | null = null;
+function ackTarget(messages: Message[]): Message | null {
+  // Grupr orders messages by (created_at, message_id): the id breaks ties
+  // between messages written in the same microsecond.
+  const ordered = [...messages].sort((a, b) =>
+    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.message_id < b.message_id ? -1 : a.message_id > b.message_id ? 1 : 0,
+  );
+  let target: Message | null = null;
   for (const m of ordered) {
     if ((m as { is_streaming?: boolean }).is_streaming === true) break;
-    target = m.created_at;
+    target = m;
   }
   return target;
 }
 
-/** Move the read position to `at`. Returns where it stands afterwards and whether it moved. */
-async function markRead(gruprId: string, at: string): Promise<{ lastReadAt: string | null; advanced: boolean }> {
-  const r = await hubJSON<{ last_read_at?: string; advanced?: boolean }>(`/grups/${encodeURIComponent(gruprId)}/read`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ at }),
-  });
-  return { lastReadAt: r?.last_read_at ?? null, advanced: r?.advanced === true };
-}
-
-/** Whether a page is newest first: the api's listing when there is no cursor (and no read position yet). */
-function newestFirst(messages: Message[]): boolean {
-  return messages.length > 1 && messages[0].created_at > messages[messages.length - 1].created_at;
+/** Move the read position to a message (its exact place in the room's order). Returns where it stands afterwards and whether it moved. */
+async function markRead(gruprId: string, messageId: string): Promise<{ lastReadAt: string | null; lastReadMessageId: string | null; advanced: boolean }> {
+  const r = await hubJSON<{ last_read_at?: string | null; last_read_message_id?: string | null; advanced?: boolean }>(
+    `/grups/${encodeURIComponent(gruprId)}/read`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: messageId }),
+    },
+  );
+  return { lastReadAt: r?.last_read_at ?? null, lastReadMessageId: r?.last_read_message_id ?? null, advanced: r?.advanced === true };
 }
 
 // ── Real-time wait ──────────────────────────────────────
@@ -1021,7 +1034,9 @@ const server = new Server(
       'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it. ' +
       'To pick up a room where you left off, without replaying the chat: (1) read the room brief with grupr_room_brief_read; ' +
       '(2) read what is new with grupr_poll_messages, after: "last_read" and ack: true, which returns only the messages you ' +
-      'have not read and marks them read; (3) before you stop, write what is done and what is next into the brief with ' +
+      'have not read and marks them read (on your first read of a room it is the room\'s newest page, oldest first, not the ' +
+      'whole history: the brief is the context, and older messages stay reachable with an explicit after timestamp); ' +
+      '(3) before you stop, write what is done and what is next into the brief with ' +
       'grupr_room_brief_write (it replaces the whole brief, so keep what should stay), and when you work under a task ' +
       'contract and have the grupr_contract_next_action tool, set the contract\'s next action as well.',
   },
@@ -1065,20 +1080,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ack: pollAck,
           });
           const fromPosition = pollAfter === LAST_READ;
-          const hasPosition = typeof page.lastReadAt === 'string';
+          const firstRead = fromPosition && page.firstRead;
+          const earlier =
+            page.earlierAvailable === true
+              ? ' Older messages exist: read them with an explicit `after` timestamp if the brief does not cover them.'
+              : page.earlierAvailable === false
+                ? ' Nothing older exists.'
+                : '';
           let note: string;
-          if (fromPosition && !hasPosition) {
+          if (firstRead && page.messages.length === 0) {
+            note = 'Your first read of this room: nothing to read yet (the room is empty, or its newest messages are replies still being written).' + earlier;
+          } else if (firstRead && page.acked) {
             note =
-              'You have no read position in this room yet, so these are the newest messages, newest first, as a call with no `after` returns. ' +
-              'Call again with ack: true to start your read position at the newest of them.';
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              `Marked read: your read position is now ${page.lastReadAt}.` +
+              earlier;
+          } else if (firstRead) {
+            note =
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              'Not acknowledged: pass ack: true to start your read position at the newest of them.' +
+              earlier;
           } else if (page.messages.length === 0) {
             note = fromPosition ? 'Nothing new since your read position.' : 'No messages; your read position did not move.';
           } else if (page.acked) {
-            note =
-              `Marked read: your read position is now ${page.lastReadAt}.` +
-              (fromPosition && newestFirst(page.messages)
-                ? ' You had no read position before this call, so these are the newest messages, newest first.'
-                : '');
+            note = `Marked read: your read position is now ${page.lastReadAt}.`;
           } else if (pollAck) {
             note = `Your read position did not move (it is already at ${page.lastReadAt ?? 'a later message'}, or the newest of these is a reply still being written).`;
           } else {
@@ -1093,7 +1118,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     count: page.count,
                     next_cursor: page.nextCursor,
                     last_read_at: page.lastReadAt ?? null,
+                    last_read_message_id: page.lastReadMessageId,
                     acked: page.acked,
+                    ...(fromPosition ? { first_read: firstRead } : {}),
+                    ...(page.earlierAvailable !== undefined ? { earlier_available: page.earlierAvailable } : {}),
                     messages: page.messages,
                     note,
                   },
@@ -1143,19 +1171,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let messages: Message[] = [];
         let reason: 'message' | 'timeout' = 'timeout';
         let lastReadAt: string | null | undefined;
+        let lastReadMessageId: string | null = null;
+        let firstRead = false;
+        let earlierAvailable: boolean | undefined;
         if (fromPosition) {
           // Resolve the read position first: anything unread returns at once.
-          // With no position yet there is nothing to resume from, so the wait
-          // is from now onward, as when `after` is omitted (and the history
-          // the api would list is neither returned nor acknowledged here).
+          // With no position yet this is the agent's first read of the room:
+          // its newest page, oldest first, as grupr_poll_messages gives it
+          // (an empty room waits from now onward).
           const page = await pollHub(gruprId, { after: LAST_READ, limit: 50 });
           lastReadAt = page.lastReadAt;
-          if (typeof lastReadAt === 'string') {
-            after = lastReadAt;
-            if (page.messages.length > 0) {
-              messages = page.messages;
-              reason = 'message';
-            }
+          lastReadMessageId = page.lastReadMessageId;
+          firstRead = page.firstRead;
+          earlierAvailable = page.earlierAvailable;
+          if (typeof lastReadAt === 'string') after = lastReadAt;
+          if (page.messages.length > 0) {
+            messages = page.messages;
+            reason = 'message';
+            after = messages[messages.length - 1].created_at;
           }
         }
         if (messages.length === 0) {
@@ -1168,8 +1201,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (waitAck && messages.length > 0) {
           const target = ackTarget(messages);
           if (target !== null) {
-            const marked = await markRead(gruprId, target);
+            const marked = await markRead(gruprId, target.message_id);
             lastReadAt = marked.lastReadAt;
+            lastReadMessageId = marked.lastReadMessageId;
             acked = marked.advanced;
           }
         }
@@ -1181,13 +1215,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? messages[messages.length - 1].created_at
             : (after ?? null);
 
+        const firstNote = firstRead ? `Your first read of this room: its newest ${messages.length} message(s), oldest first. ` : '';
         let note: string;
         if (messages.length === 0) {
           note = fromPosition
             ? 'No new messages before timeout. Call again with after: "last_read".'
             : 'No new messages before timeout. Call again with the SAME cursor.';
         } else if (acked) {
-          note = `Marked read: your read position is now ${lastReadAt}.`;
+          note = `${firstNote}Marked read: your read position is now ${lastReadAt}.`;
         } else if (waitAck) {
           note = 'Your read position did not move (it is already past these, or the newest of them is a reply still being written).';
         } else if (fromPosition) {
@@ -1206,7 +1241,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
         if (fromPosition || waitAck) {
           payload.last_read_at = lastReadAt ?? null;
+          payload.last_read_message_id = lastReadMessageId;
           payload.acked = acked;
+        }
+        if (fromPosition) {
+          payload.first_read = firstRead;
+          if (earlierAvailable !== undefined) payload.earlier_available = earlierAvailable;
         }
 
         return {
