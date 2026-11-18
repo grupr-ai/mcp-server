@@ -484,7 +484,7 @@ const TOOLS = [
       'A command routine is held to the scripts its command names (python3 x.py, ./run.sh, after a literal cd): each is pinned by hash when it is approved, a file that does not exist yet is recorded as absent, ' +
       'and a file Grupr cannot pin (too large, outside the workspace, a path the shell decides) is recorded as not pinned, which the approval card says. If a pinned file changes or disappears, or an absent one appears, the next firing ' +
       'does not run the command and the routine pauses until the owner re-approves it. Files a script loads are not pinned. So tell the owner before you change a routine\'s script. ' +
-      'Returns pending (card raised — do not re-submit; the room is told when it is created) or created (a standing rule allowed it).',
+      'Returns pending (card raised — do not re-submit; the room is told when it is created). A routine proposal is never approved by a standing "always allow" rule and cannot be approved with edits: a person approves it as proposed, every time.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -579,7 +579,7 @@ const TOOLS = [
     description:
       "Ask for a recipe to be installed for this agent: Grupr writes the recipe's script into the workspace and schedules it. A human must approve first " +
       '(an approval card shows the recipe and exactly what it will check); nothing is installed until then. Returns pending (do not re-submit; the room is told when it is created) ' +
-      'or created (a standing rule allowed it). Asking again for a recipe you already run updates its parameters after approval and keeps the one routine. ' +
+      'A recipe proposal is never approved by a standing rule: a person approves it, every time. Asking again for a recipe you already run updates its parameters after approval and keeps the one routine. ' +
       'If params.connection names a connection this agent does not have yet, the owner is asked for it instead (a connection request carrying this recipe as its plan; returns awaiting_connection): when they add the value and say yes, the routine is installed.',
     inputSchema: {
       type: 'object',
@@ -1453,7 +1453,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text:
-                `${what} created (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` +
+                `${what} created: schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` +
                 then,
             },
           ],
@@ -1579,7 +1579,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const sch = d.schedule ?? d;
         return {
-          content: [{ type: 'text', text: `Recipe installed (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
+          content: [{ type: 'text', text: `Recipe installed: schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
         };
       }
 
