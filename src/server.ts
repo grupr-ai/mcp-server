@@ -256,8 +256,9 @@ const TOOLS = [
       'Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply. ' +
       'A contract is also the handoff. `inputs` is what the work starts from, in order: Room Files (kind "file": read one with ' +
       'grupr_room_file_read, passing its `grupr_id` and `path`; `missing: true` means it is no longer in Room Files, so say so in the ' +
-      'room instead of guessing) and short notes (kind "note"). `next_action` is the next step in words, with `next_action_at` and, when ' +
-      'an agent wrote it, `next_action_agent_id` (absent: the owner wrote it). `assignee` is the agent the contract is handed to (null: ' +
+      'room instead of guessing) and short notes (kind "note"). `next_action` is the next step in words, with `next_action_at`, ' +
+      '`next_action_author` ("owner" or "agent"; absent when there is none) and, when an agent wrote it, `next_action_agent_id` (absent ' +
+      'once that agent is deleted). `assignee` is the agent the contract is handed to (null: ' +
       'nobody), and `assigned_to_you` says whether that is you: if it is, keep `next_action` current with grupr_contract_next_action.',
     inputSchema: { type: 'object', properties: {} },
   },
@@ -265,8 +266,8 @@ const TOOLS = [
     name: 'grupr_contract',
     description:
       'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused, and the ' +
-      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (and who ' +
-      'wrote it, when), `assignee` and `assigned_to_you`.',
+      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (with ' +
+      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`.',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
