@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.19.0';
+export const SERVER_VERSION = '0.20.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -44,6 +44,12 @@ const MAX_WAIT_SECONDS = Math.max(5, Number(process.env.GRUPR_MAX_WAIT_SECONDS) 
  * instead of waking the caller once per message.
  */
 const BURST_SETTLE_MS = 400;
+
+// ── Read position and room brief ────────────────────────
+/** `after` value that means "from my read position in this room", kept by Grupr. */
+const LAST_READ = 'last_read';
+/** The room brief is capped at 16 KB by the api; checked here first to save the call. */
+const MAX_BRIEF_BYTES = 16 * 1024;
 
 // ── Who is calling ──────────────────────────────────────
 //
@@ -116,6 +122,12 @@ const TOOLS = [
     name: 'grupr_poll_messages',
     description:
       'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling. ' +
+      'To pick up where you left off without keeping a cursor yourself, pass after: "last_read": Grupr keeps a read position for this agent in each room and returns only what you have not acknowledged, oldest first. ' +
+      'Add ack: true to move that position to the newest message this call returns (it never moves backwards), so the next call starts after it; without ack the same messages come back next time. ' +
+      'On your FIRST read of a room (no read position yet) after: "last_read" returns the room\'s newest page (up to limit), OLDEST FIRST, flagged first_read: true, and earlier_available says whether older messages exist: ' +
+      'an agent that has never read a room has nowhere it left off, the room brief is where the context lives, and older history stays reachable with an explicit `after` timestamp. ' +
+      'A reply another agent is still writing is held back until it is finished, and is never returned twice. ' +
+      'This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
       'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
     inputSchema: {
       type: 'object',
@@ -126,7 +138,13 @@ const TOOLS = [
         },
         after: {
           type: 'string',
-          description: 'RFC3339 timestamp — return only messages strictly after this time.',
+          description:
+            'RFC3339 timestamp — return only messages strictly after this time. Or the word "last_read" — return only messages after this agent\'s read position in the room.',
+        },
+        ack: {
+          type: 'boolean',
+          description:
+            'Move this agent\'s read position in the room to the newest message this call returns. Default false. Never moves the position backwards.',
         },
         limit: {
           type: 'number',
@@ -146,7 +164,10 @@ const TOOLS = [
       'This is the preferred way to follow a room: it replaces sleep-then-poll loops. ' +
       'CORRECTNESS: always pass your own processed cursor as `after` and advance it only after you have handled a message. ' +
       'The underlying delivery is a WebSocket with an HTTP backlog drain on every call, so anything missed while disconnected ' +
-      '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state.',
+      '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state. ' +
+      'Instead of your own cursor you may pass after: "last_read": the wait starts from the read position Grupr keeps for this agent in the room, and returns at once if anything is unread ' +
+      '(with no read position yet it returns the room\'s newest page at once, oldest first, flagged first_read: true, as grupr_poll_messages does; an empty room waits from now onward). Add ack: true to move the read position to the newest finished message this call returns; ' +
+      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -157,7 +178,12 @@ const TOOLS = [
         after: {
           type: 'string',
           description:
-            'RFC3339 timestamp — the created_at of the last message you processed. Return only messages strictly after it. Omit to wait for messages from now onward.',
+            'RFC3339 timestamp — the created_at of the last message you processed. Return only messages strictly after it. Or the word "last_read" — wait from this agent\'s read position in the room. Omit to wait for messages from now onward.',
+        },
+        ack: {
+          type: 'boolean',
+          description:
+            'Move this agent\'s read position in the room to the newest finished message this call returns. Default false. Never moves the position backwards.',
         },
         timeout_seconds: {
           type: 'number',
@@ -380,6 +406,34 @@ const TOOLS = [
         file: { type: 'string', description: 'file_id or the name shown by grupr_room_files.' },
       },
       required: ['grupr_id', 'file'],
+    },
+  },
+  {
+    name: 'grupr_room_brief_read',
+    description:
+      "Read a grupr's room brief: the one short note (the Room File room-brief.md, up to 16 KB of Markdown) where the room keeps what is done and what is next, " +
+      'so whoever picks the work up does not have to replay the chat. Read it first when you come back to a room. Returns the text, its version, and who last wrote it and when; ' +
+      'a room with no brief yet says so. The agent must be assigned to the grupr.',
+    inputSchema: {
+      type: 'object',
+      properties: { grupr_id: { type: 'string', description: 'The grupr (room) id.' } },
+      required: ['grupr_id'],
+    },
+  },
+  {
+    name: 'grupr_room_brief_write',
+    description:
+      "Replace a grupr's room brief (the Room File room-brief.md) with new Markdown. The WHOLE brief is replaced, so read it first and send back everything that should stay. " +
+      'Write it before you stop: what is done, what is next, and anything the next person or agent must know. At most 16 KB of text. ' +
+      'It is a Room File: the previous brief is kept as a version when the room has storage for it, the bytes count against the room owner\'s storage, ' +
+      'and the room is told, as this agent. Sending the same text again changes nothing. The agent must be assigned to the grupr.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id.' },
+        content: { type: 'string', description: 'The whole brief in Markdown (at most 16 KB). Not empty.' },
+      },
+      required: ['grupr_id', 'content'],
     },
   },
   {
@@ -811,6 +865,86 @@ function textOrBase64(buf: Buffer): { text?: string; base64?: string; note?: str
   };
 }
 
+// ── Read position ───────────────────────────────────────
+//
+// Grupr keeps, for each agent in each room, the created_at of the newest
+// message the agent acknowledged. `after=last_read` reads from it and `ack=1`
+// moves it to the newest message the call returns; POST .../read moves it to
+// a time. The api never moves it backwards.
+
+interface HubPage {
+  messages: Message[];
+  count: number;
+  nextCursor: string | null;
+  /** The agent's read position after the call; null when it has none. Undefined when the api did not report one. */
+  lastReadAt: string | null | undefined;
+  /** The other half of the position: the id of that newest acknowledged message. */
+  lastReadMessageId: string | null;
+  acked: boolean;
+  /** This was the agent's first read of the room (no position yet): the newest page, oldest first. */
+  firstRead: boolean;
+  /** On a first read: whether older messages exist beyond the page. */
+  earlierAvailable: boolean | undefined;
+}
+
+/** One page of a room's messages straight from the hub, with the read-position meta the SDK does not carry. */
+async function pollHub(gruprId: string, opts: { after?: string; limit?: number; ack?: boolean }): Promise<HubPage> {
+  const q = new URLSearchParams();
+  if (opts.after) q.set('after', opts.after);
+  if (typeof opts.limit === 'number' && Number.isFinite(opts.limit)) q.set('limit', String(Math.floor(opts.limit)));
+  if (opts.ack) q.set('ack', '1');
+  const res = await hubFetch(`/grups/${encodeURIComponent(gruprId)}/messages${q.toString() ? `?${q}` : ''}`);
+  const body: any = await res.json().catch(() => null);
+  if (!res.ok) {
+    const e = body?.errors?.[0];
+    throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+  }
+  const messages: Message[] = Array.isArray(body?.data) ? body.data : [];
+  const meta = body?.meta ?? {};
+  return {
+    messages,
+    count: typeof meta.count === 'number' ? meta.count : messages.length,
+    nextCursor: meta.next_cursor ?? null,
+    lastReadAt: 'last_read_at' in meta ? (meta.last_read_at ?? null) : undefined,
+    lastReadMessageId: typeof meta.last_read_message_id === 'string' ? meta.last_read_message_id : null,
+    acked: meta.acked === true,
+    firstRead: meta.first_read === true,
+    earlierAvailable: typeof meta.earlier_available === 'boolean' ? meta.earlier_available : undefined,
+  };
+}
+
+/**
+ * How far an acknowledgement of these messages may go: the created_at of the
+ * newest one that comes before any reply still being written. A reply that is
+ * still streaming has no text yet; acknowledging it would mark it read empty.
+ */
+function ackTarget(messages: Message[]): Message | null {
+  // Grupr orders messages by (created_at, message_id): the id breaks ties
+  // between messages written in the same microsecond.
+  const ordered = [...messages].sort((a, b) =>
+    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.message_id < b.message_id ? -1 : a.message_id > b.message_id ? 1 : 0,
+  );
+  let target: Message | null = null;
+  for (const m of ordered) {
+    if ((m as { is_streaming?: boolean }).is_streaming === true) break;
+    target = m;
+  }
+  return target;
+}
+
+/** Move the read position to a message (its exact place in the room's order). Returns where it stands afterwards and whether it moved. */
+async function markRead(gruprId: string, messageId: string): Promise<{ lastReadAt: string | null; lastReadMessageId: string | null; advanced: boolean }> {
+  const r = await hubJSON<{ last_read_at?: string | null; last_read_message_id?: string | null; advanced?: boolean }>(
+    `/grups/${encodeURIComponent(gruprId)}/read`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: messageId }),
+    },
+  );
+  return { lastReadAt: r?.last_read_at ?? null, lastReadMessageId: r?.last_read_message_id ?? null, advanced: r?.advanced === true };
+}
+
 // ── Real-time wait ──────────────────────────────────────
 //
 // Wraps the SDK's WebSocket-backed streamEvents() in a bounded, blocking
@@ -897,7 +1031,14 @@ const server = new Server(
       'You act as one Grupr agent, inside the rooms (gruprs) that agent is assigned to. Call grupr_rooms first to learn ' +
       'the rooms and their grupr_ids; every other room tool wants one of those ids. Read before you write: poll a room ' +
       'before posting in it. Posts are visible to the people and agents in the room. Workspace commands, mail and ' +
-      'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it.',
+      'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it. ' +
+      'To pick up a room where you left off, without replaying the chat: (1) read the room brief with grupr_room_brief_read; ' +
+      '(2) read what is new with grupr_poll_messages, after: "last_read" and ack: true, which returns only the messages you ' +
+      'have not read and marks them read (on your first read of a room it is the room\'s newest page, oldest first, not the ' +
+      'whole history: the brief is the context, and older messages stay reachable with an explicit after timestamp); ' +
+      '(3) before you stop, write what is done and what is next into the brief with ' +
+      'grupr_room_brief_write (it replaces the whole brief, so keep what should stay), and when you work under a task ' +
+      'contract and have the grupr_contract_next_action tool, set the contract\'s next action as well.',
   },
 );
 
@@ -928,8 +1069,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_poll_messages': {
+        const pollAfter = typeof args.after === 'string' && args.after.trim() ? args.after.trim() : undefined;
+        const pollAck = args.ack === true;
+        if (pollAfter === LAST_READ || pollAck) {
+          // The read position lives on the api; the SDK's poll carries neither
+          // ack nor the position, so this path talks to the hub directly.
+          const page = await pollHub(String(args.grupr_id), {
+            after: pollAfter,
+            limit: typeof args.limit === 'number' ? args.limit : undefined,
+            ack: pollAck,
+          });
+          const fromPosition = pollAfter === LAST_READ;
+          const firstRead = fromPosition && page.firstRead;
+          const earlier =
+            page.earlierAvailable === true
+              ? ' Older messages exist: read them with an explicit `after` timestamp if the brief does not cover them.'
+              : page.earlierAvailable === false
+                ? ' Nothing older exists.'
+                : '';
+          let note: string;
+          if (firstRead && page.messages.length === 0) {
+            note = 'Your first read of this room: nothing to read yet (the room is empty, or its newest messages are replies still being written).' + earlier;
+          } else if (firstRead && page.acked) {
+            note =
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              `Marked read: your read position is now ${page.lastReadAt}.` +
+              earlier;
+          } else if (firstRead) {
+            note =
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              'Not acknowledged: pass ack: true to start your read position at the newest of them.' +
+              earlier;
+          } else if (page.messages.length === 0) {
+            note = fromPosition ? 'Nothing new since your read position.' : 'No messages; your read position did not move.';
+          } else if (page.acked) {
+            note = `Marked read: your read position is now ${page.lastReadAt}.`;
+          } else if (pollAck) {
+            note = `Your read position did not move (it is already at ${page.lastReadAt ?? 'a later message'}, or the newest of these is a reply still being written).`;
+          } else {
+            note = 'Not acknowledged: these come back on the next after: "last_read" call until you pass ack: true.';
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    count: page.count,
+                    next_cursor: page.nextCursor,
+                    last_read_at: page.lastReadAt ?? null,
+                    last_read_message_id: page.lastReadMessageId,
+                    acked: page.acked,
+                    ...(fromPosition ? { first_read: firstRead } : {}),
+                    ...(page.earlierAvailable !== undefined ? { earlier_available: page.earlierAvailable } : {}),
+                    messages: page.messages,
+                    note,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
         const result = await session().client.pollMessages(String(args.grupr_id), {
-          after: args.after as string | undefined,
+          after: pollAfter,
           limit: typeof args.limit === 'number' ? args.limit : undefined,
         });
         return {
@@ -952,7 +1156,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'grupr_wait_for_messages': {
         const gruprId = String(args.grupr_id);
-        const after = typeof args.after === 'string' ? args.after : undefined;
+        const rawAfter = typeof args.after === 'string' && args.after.trim() ? args.after.trim() : undefined;
+        const waitAck = args.ack === true;
+        const fromPosition = rawAfter === LAST_READ;
         const requested =
           typeof args.timeout_seconds === 'number'
             ? args.timeout_seconds
@@ -961,12 +1167,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           Math.min(Math.max(1, requested), MAX_WAIT_SECONDS) * 1000;
 
         const startedAt = Date.now();
-        const { messages, reason } = await waitForMessages(
-          gruprId,
-          after,
-          waitMs,
-        );
+        let after = fromPosition ? undefined : rawAfter;
+        let messages: Message[] = [];
+        let reason: 'message' | 'timeout' = 'timeout';
+        let lastReadAt: string | null | undefined;
+        let lastReadMessageId: string | null = null;
+        let firstRead = false;
+        let earlierAvailable: boolean | undefined;
+        if (fromPosition) {
+          // Resolve the read position first: anything unread returns at once.
+          // With no position yet this is the agent's first read of the room:
+          // its newest page, oldest first, as grupr_poll_messages gives it
+          // (an empty room waits from now onward).
+          const page = await pollHub(gruprId, { after: LAST_READ, limit: 50 });
+          lastReadAt = page.lastReadAt;
+          lastReadMessageId = page.lastReadMessageId;
+          firstRead = page.firstRead;
+          earlierAvailable = page.earlierAvailable;
+          if (typeof lastReadAt === 'string') after = lastReadAt;
+          if (page.messages.length > 0) {
+            messages = page.messages;
+            reason = 'message';
+            after = messages[messages.length - 1].created_at;
+          }
+        }
+        if (messages.length === 0) {
+          ({ messages, reason } = await waitForMessages(gruprId, after, waitMs));
+        }
         const waitedMs = Date.now() - startedAt;
+
+        // ack: move the read position to the newest finished message returned.
+        let acked = false;
+        if (waitAck && messages.length > 0) {
+          const target = ackTarget(messages);
+          if (target !== null) {
+            const marked = await markRead(gruprId, target.message_id);
+            lastReadAt = marked.lastReadAt;
+            lastReadMessageId = marked.lastReadMessageId;
+            acked = marked.advanced;
+          }
+        }
 
         // next_cursor is a suggestion, not state: it is only safe to adopt
         // once the caller has actually processed every message returned.
@@ -975,25 +1215,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? messages[messages.length - 1].created_at
             : (after ?? null);
 
+        const firstNote = firstRead ? `Your first read of this room: its newest ${messages.length} message(s), oldest first. ` : '';
+        let note: string;
+        if (messages.length === 0) {
+          note = fromPosition
+            ? 'No new messages before timeout. Call again with after: "last_read".'
+            : 'No new messages before timeout. Call again with the SAME cursor.';
+        } else if (acked) {
+          note = `${firstNote}Marked read: your read position is now ${lastReadAt}.`;
+        } else if (waitAck) {
+          note = 'Your read position did not move (it is already past these, or the newest of them is a reply still being written).';
+        } else if (fromPosition) {
+          note = 'Not acknowledged: these come back on the next after: "last_read" call until you pass ack: true.';
+        } else {
+          note = 'Advance your cursor to next_cursor only after processing every message above.';
+        }
+
+        const payload: Record<string, unknown> = {
+          count: messages.length,
+          reason,
+          waited_ms: waitedMs,
+          next_cursor: nextCursor,
+          messages,
+          note,
+        };
+        if (fromPosition || waitAck) {
+          payload.last_read_at = lastReadAt ?? null;
+          payload.last_read_message_id = lastReadMessageId;
+          payload.acked = acked;
+        }
+        if (fromPosition) {
+          payload.first_read = firstRead;
+          if (earlierAvailable !== undefined) payload.earlier_available = earlierAvailable;
+        }
+
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(
-                {
-                  count: messages.length,
-                  reason,
-                  waited_ms: waitedMs,
-                  next_cursor: nextCursor,
-                  messages,
-                  note:
-                    messages.length === 0
-                      ? 'No new messages before timeout. Call again with the SAME cursor.'
-                      : 'Advance your cursor to next_cursor only after processing every message above.',
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(payload, null, 2),
             },
           ],
         };
@@ -1518,6 +1778,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{ type: 'text', text: `Recipe installed (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
         };
+      }
+
+      case 'grupr_room_brief_read': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const b = await hubJSON<Record<string, any>>(`/grups/${gid}/brief`);
+        if (!b?.exists) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'This room has no brief yet. Write one with grupr_room_brief_write: what is done, what is next.',
+              },
+            ],
+          };
+        }
+        const who = b.updated_by ? ` by ${b.updated_by}${b.updated_by_agent ? ' (agent)' : ''}` : '';
+        const head =
+          `room-brief.md, version ${b.version ?? '?'}, ${b.size ?? '?'} B, last written ${b.updated_at ?? '?'}${who}` +
+          (b.truncated ? ' [only the first 16 KB is shown; the file is larger]' : '');
+        return { content: [{ type: 'text', text: `${head}\n\n${b.content ?? ''}` }] };
+      }
+
+      case 'grupr_room_brief_write': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const content = typeof args.content === 'string' ? args.content : '';
+        if (!content.trim()) {
+          throw new Error('content is required: the whole brief, in Markdown. To remove the brief, delete room-brief.md from the room\'s Files.');
+        }
+        const bytes = Buffer.byteLength(content, 'utf8');
+        if (bytes > MAX_BRIEF_BYTES) {
+          throw new Error(`the brief is ${bytes} bytes; the cap is ${MAX_BRIEF_BYTES} (16 KB). Shorten it: keep what is done and what is next, and move detail into a Room File.`);
+        }
+        const b = await hubJSON<Record<string, any>>(`/grups/${gid}/brief`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        });
+        const text = b?.unchanged
+          ? `The brief already says exactly this (version ${b.version ?? '?'}); nothing changed.`
+          : `Brief saved: version ${b?.version ?? '?'}, ${b?.size ?? bytes} B. The room was told.`;
+        return { content: [{ type: 'text', text }] };
       }
 
       case 'grupr_room_doc_write': {
