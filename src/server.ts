@@ -473,28 +473,43 @@ const TOOLS = [
   {
     name: 'grupr_workspace_schedule',
     description:
-      "Propose a routine: one shell command that runs in this agent's workspace on a cron, with the result posted in the room each time. " +
+      'Propose a routine for this agent, on a cron. Two kinds. ' +
+      "kind \"command\" (default): one shell command that runs in this agent's workspace, with the result posted in the room each time. " +
+      'kind \"prompt\": an instruction of up to 2,000 characters for this agent itself, e.g. "Write the morning brief in this room": at each firing Grupr posts it in the room ' +
+      "as the agent's owner (\"Scheduled by <owner> for @agent: ...\") and calls this agent's webhook for that room (room webhook, else wake webhook); with no webhook the agent sees it " +
+      'the next time it reads the room. A prompt routine uses no workspace and no sandbox time, and takes only grupr_id, prompt, cron, timezone and label. ' +
       "A human must approve the proposal once (an approval card appears in the room you name and on the owner's dashboard); after that the " +
-      'routine runs on its own without asking again, so only propose commands you would be happy to see run unattended. Destructive commands ' +
-      'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines. Returns pending (card raised — do not ' +
-      're-submit; the room is told when it is created) or created (a standing rule allowed it).',
+      'routine runs on its own without asking again, so only propose what you would be happy to see run unattended. Destructive commands ' +
+      'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines of both kinds together. ' +
+      'A command routine is held to the scripts its command names (python3 x.py, ./run.sh): they are recorded when it is approved, and if one changes or disappears the next firing ' +
+      'runs nothing and the routine pauses until the owner re-approves it. So tell the owner before you change a routine\'s script. ' +
+      'Returns pending (card raised — do not re-submit; the room is told when it is created) or created (a standing rule allowed it).',
     inputSchema: {
       type: 'object',
       properties: {
         grupr_id: { type: 'string', description: 'The grupr (room) the routine belongs to and posts into; the agent must be assigned to it.' },
-        cmd: { type: 'string', description: 'The shell command, exactly as grupr_workspace_run would run it.' },
+        kind: {
+          type: 'string',
+          enum: ['command', 'prompt'],
+          description: 'command (default): run cmd in the workspace. prompt: post the instruction in prompt for this agent; no workspace is used.',
+        },
+        cmd: { type: 'string', description: 'For a command routine: the shell command, exactly as grupr_workspace_run would run it.' },
+        prompt: {
+          type: 'string',
+          description: 'For a prompt routine: the instruction, up to 2,000 characters. Say what to do and where the result goes; it is all the agent is told at each firing.',
+        },
         cron: {
           type: 'string',
           description: 'Five-field cron (minute hour day-of-month month day-of-week), e.g. "0 8 * * 1-5" = weekdays 08:00; or @hourly / @daily / @weekly / @monthly.',
         },
         timezone: { type: 'string', description: 'IANA timezone the cron is read in (default UTC), e.g. America/New_York.' },
         label: { type: 'string', description: 'Short human label, e.g. "Morning report" (≤ 80 chars).' },
-        cwd: { type: 'string', description: 'Working directory (default /home/user).' },
-        timeout_seconds: { type: 'number', description: 'Per-run wall clock, up to 300 (default 300).' },
+        cwd: { type: 'string', description: 'Command routines only. Working directory (default /home/user).' },
+        timeout_seconds: { type: 'number', description: 'Command routines only. Per-run wall clock, up to 300 (default 300).' },
         outputs: {
           type: 'array',
           description:
-            "Up to 5 workspace files to publish into the room's Files after each successful run, e.g. " +
+            "Command routines only. Up to 5 workspace files to publish into the room's Files after each successful run, e.g. " +
             '[{"path":"out/report.md"},{"path":"out/data.csv","name":"reports/data.csv"}]. Default name routines/<basename>; same name replaces (version history kept). ' +
             'This is how a scheduled report reaches people: write the file in the workspace, name it here.',
           items: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' } }, required: ['path'] },
@@ -502,26 +517,28 @@ const TOOLS = [
         inputs: {
           type: 'array',
           description:
-            'Up to 10 URLs Grupr fetches before each run and writes into the workspace, e.g. [{"url":"https://api.example.com/status","path":"in/status.json","connection":"intranet"}]. ' +
+            'Command routines only. Up to 10 URLs Grupr fetches before each run and writes into the workspace, e.g. [{"url":"https://api.example.com/status","path":"in/status.json","connection":"intranet"}]. ' +
             'Each lands at path with a path.meta.json sidecar (status, bytes, ms, error) for the script to read. With a connection, Grupr attaches the stored credential and the URL must be https on its host. ' +
             'This is how a routine reads a private API or page without the credential ever entering the workspace.',
           items: { type: 'object', properties: { url: { type: 'string' }, path: { type: 'string' }, connection: { type: 'string' } }, required: ['url', 'path'] },
         },
-        render: { type: 'boolean', description: 'Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
+        render: { type: 'boolean', description: 'Command routines only. Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
         notify: {
           type: 'string',
           enum: ['always', 'failures', 'output'],
           description:
-            "always (default): post every run's output in the room; failures: post only failing runs; output: post only when the run prints something or fails " +
+            "Command routines only (a prompt routine always posts its instruction). always (default): post every run's output in the room; failures: post only failing runs; output: post only when the run prints something or fails " +
             '(like cron mail-on-output: write the script to stay silent unless there is news, and a silent run also publishes its files quietly).',
         },
       },
-      required: ['grupr_id', 'cmd', 'cron'],
+      required: ['grupr_id', 'cron'],
     },
   },
   {
     name: 'grupr_workspace_schedules',
-    description: "List this agent's routines: schedule, timezone, room, enabled, next and last run, run and failure counts.",
+    description:
+      "List this agent's routines of both kinds: the command or the instruction, schedule, timezone, room, enabled, next and last run, run and failure counts, " +
+      'and why a routine is paused when Grupr paused it (repeated failures, or a script that changed since it was approved: only the owner can re-approve that).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -536,7 +553,8 @@ const TOOLS = [
   {
     name: 'grupr_workspace_schedule_runs',
     description:
-      "What one of this agent's routines did on its recent firings: when, exit code, how long, an excerpt of the output, and what it published to the room's Files. " +
+      "What one of this agent's routines did on its recent firings: when, exit code, how long, an excerpt of the output, and what it published to the room's Files " +
+      '(for a prompt routine: whether the instruction was posted, or why not). ' +
       'Use it to check a routine is healthy before telling a person it is, or to see why it failed. Full output of one run: grupr_workspace_result with its run_id.',
     inputSchema: {
       type: 'object',
@@ -882,6 +900,15 @@ async function waitForMessages(
 }
 
 // ── Server setup ────────────────────────────────────────
+
+/** What a routine does, for a listing: its instruction (prompt routine) or its command. */
+export function routineWhat(r: Record<string, unknown>): string {
+  if (r.kind === 'prompt') {
+    const text = String(r.prompt ?? '').replace(/\s+/g, ' ').trim();
+    return `instruction "${text.length > 160 ? `${text.slice(0, 159)}…` : text}"`;
+  }
+  return `\`${r.cmd}\``;
+}
 
 /**
  * A new Server with every tool registered. stdio connects one for the
@@ -1349,12 +1376,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_workspace_schedule': {
+        // The api decides the kind (and refuses a mix); here a missing kind
+        // with an instruction and no command means a prompt routine.
+        const prompt = typeof args.prompt === 'string' && args.prompt.trim() ? args.prompt : undefined;
+        const cmd = typeof args.cmd === 'string' && args.cmd.trim() ? args.cmd : undefined;
+        const kind = typeof args.kind === 'string' && args.kind ? args.kind : prompt && !cmd ? 'prompt' : 'command';
+        const isPrompt = kind === 'prompt';
         const res = await hubFetch('/workspace/schedule', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             grupr_id: String(args.grupr_id),
-            cmd: String(args.cmd),
+            kind,
+            prompt,
+            cmd,
             cron: String(args.cron),
             timezone: typeof args.timezone === 'string' && args.timezone ? args.timezone : undefined,
             label: typeof args.label === 'string' && args.label ? args.label : undefined,
@@ -1378,14 +1413,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
         }
         const d = body?.data ?? {};
+        const what = isPrompt ? 'Prompt routine' : 'Routine';
+        const then = isPrompt
+          ? ' At each firing the instruction is posted in the room as the owner and this agent\'s webhook for that room is called; no workspace is used.'
+          : '';
         if (res.status === 202 || d.status === 'pending') {
           return {
             content: [
               {
                 type: 'text',
                 text:
-                  `Routine proposed — approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
-                  'When someone approves, the routine is created and the room is told; if they deny, nothing is scheduled.',
+                  `${what} proposed — approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
+                  'When someone approves, the routine is created and the room is told; if they deny, nothing is scheduled.' +
+                  then,
               },
             ],
           };
@@ -1395,7 +1435,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Routine created (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.`,
+              text:
+                `${what} created (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` +
+                then,
             },
           ],
         };
@@ -1408,7 +1450,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const lines = list.map(
           (r) =>
-            `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}\`${r.cmd}\` · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
+            `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}${routineWhat(r)} · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
             `${r.enabled ? 'on' : 'paused'} · next ${r.next_run_at ?? '—'} · last ${r.last_run_at ? `${r.last_run_at} (${r.last_status}${typeof r.last_exit_code === 'number' ? `, exit ${r.last_exit_code}` : ''})` : 'never'} · ` +
             `${r.runs ?? 0} runs, ${r.failures ?? 0} failed` +
             (Array.isArray(r.outputs) && (r.outputs as { name?: string; path?: string }[]).length > 0
@@ -1416,7 +1458,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               : '') +
             (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : '') +
             (typeof r.consecutive_failures === 'number' && r.consecutive_failures > 0 ? ` · FAILING: ${r.consecutive_failures} in a row` : '') +
-            (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : ''),
+            (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : '') +
+            (r.paused_reason === 'script_changed'
+              ? ` · PAUSED: ${r.paused_detail ? `\`${r.paused_detail}\`` : 'a script'} changed since the routine was approved, so nothing runs until the owner re-approves it on the agent page`
+              : ''),
         );
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
@@ -1438,7 +1483,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const out = [r.stdout, r.stderr, r.error].filter((x) => typeof x === 'string' && x).join('\n').trim();
           const first = out.split('\n').find((l) => l.trim()) ?? '';
           return (
-            `- ${r.finished_at ?? r.created_at} · ${r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
+            `- ${r.finished_at ?? r.created_at} · ${r.source === 'prompt' ? (r.status === 'done' ? 'instruction posted' : 'not delivered') : r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
             (typeof r.wall_clock_ms === 'number' ? ` · ${r.wall_clock_ms} ms` : '') +
             (ins.length ? ` · fetched ${ins.map((i) => `${i.ok ? 'ok' : 'FAILED'}${i.status ? ` ${i.status}` : ''} ${i.url}${i.connection ? ` via ${i.connection}` : ''}${i.error ? ` (${i.error})` : ''}`).join('; ')}` : '') +
             (pub.length ? ` · published ${pub.map((p) => (p.error ? `${p.name} FAILED (${p.error})` : `${p.name}${p.unchanged ? ' (unchanged)' : ''}`)).join(', ')}` : '') +
