@@ -53,6 +53,9 @@ export const TOOL_META: Record<string, ToolMeta> = {
   grupr_contracts: read('List task contracts'),
   grupr_contract: read('One task contract'),
   grupr_contract_traces: read('Pass/fail traces of a contract'),
+  // Replaces the contract's one next-action line (no history is kept of the
+  // previous one), on Grupr only; sending the same words again changes nothing.
+  grupr_contract_next_action: write("Set a contract's next action", { idempotent: true }),
   grupr_workspace_run: write('Run a command in the workspace', { destructive: true, openWorld: true }),
   grupr_workspace_result: read('Result of a workspace run'),
   grupr_workspace_files: read('List workspace files'),

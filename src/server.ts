@@ -251,13 +251,22 @@ const TOOLS = [
       "List the task contracts that bind you: your own and those of rooms you are in. A contract is the owner's statement of what done " +
       'looks like (a goal and acceptance checks) with a budget (runs, sandbox seconds, lens calls, deadline). Every command you run with ' +
       'grupr_workspace_run is recorded against the contract that applies (the one you name, else the room\'s, else yours), refused once ' +
-      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room), and graded against the checks into a ' +
-      'pass/fail trace. Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply.',
+      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room). The checks say what the owner will hold ' +
+      'the work to; grading runs against them into pass/fail traces is not switched on yet. ' +
+      'Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply. ' +
+      'A contract is also the handoff. `inputs` is what the work starts from, in order: Room Files (kind "file": read one with ' +
+      'grupr_room_file_read, passing its `grupr_id` and `path`; `missing: true` means it is no longer in Room Files, so say so in the ' +
+      'room instead of guessing) and short notes (kind "note"). `next_action` is the next step in words, with `next_action_at` and, when ' +
+      'an agent wrote it, `next_action_agent_id` (absent: the owner wrote it). `assignee` is the agent the contract is handed to (null: ' +
+      'nobody), and `assigned_to_you` says whether that is you: if it is, keep `next_action` current with grupr_contract_next_action.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'grupr_contract',
-    description: 'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused.',
+    description:
+      'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused, and the ' +
+      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (and who ' +
+      'wrote it, when), `assignee` and `assigned_to_you`.',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
@@ -268,7 +277,7 @@ const TOOLS = [
     name: 'grupr_contract_traces',
     description:
       "The pass/fail traces of runs graded under a contract, newest first: verdict, each check's result and note, lens calls spent. " +
-      'Read the latest one to see why a run failed before you try again.',
+      'Grading is not switched on yet, so this reads empty for now; once it is, read the latest trace to see why a run failed before you try again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -276,6 +285,28 @@ const TOOLS = [
         limit: { type: 'number', description: 'Newest traces to return (default 50, max 200).' },
       },
       required: ['contract_id'],
+    },
+  },
+  {
+    name: 'grupr_contract_next_action',
+    description:
+      'Write the next action of a task contract you are the assignee of (`assigned_to_you: true` in grupr_contracts): what is done and ' +
+      'what comes next, in plain words, up to 500 characters, so whoever picks the work up (you after a restart, another agent, the ' +
+      'owner) can go on without replaying the room. It replaces the previous next action and records that you wrote it; pass "" to ' +
+      'clear it. Write it before you stop working and whenever the next step changes. This is the only thing an agent can change on a ' +
+      "contract: its goal, checks, budget, inputs and assignee are the owner's. Refused with 403 contract_not_assignee when the " +
+      'contract is not assigned to you, and with 409 contract_closed once it is done or cancelled. Returns the contract as it now reads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contract_id: { type: 'string', description: 'From grupr_contracts.' },
+        next_action: {
+          type: 'string',
+          maxLength: 500,
+          description: 'The next step, in plain words (up to 500 characters). An empty string clears it.',
+        },
+      },
+      required: ['contract_id', 'next_action'],
     },
   },
   {
@@ -299,8 +330,8 @@ const TOOLS = [
       'Standing permissions the owner has granted for this agent auto-approve (auto_approved: true). ' +
       'Commands run under /bin/sh in /home/user by default; files persist between calls; the sandbox pauses after ~5 idle minutes ' +
       'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes. ' +
-      'If a task contract applies (grupr_contracts) the run is recorded against it, refused with HTTP 409 contract_budget_exhausted once ' +
-      'its budget is used up, and graded against its checks.',
+      'If a task contract applies (grupr_contracts) the run is recorded against it and refused with HTTP 409 contract_budget_exhausted once ' +
+      'its budget is used up.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1090,6 +1121,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: JSON.stringify(c, null, 2) }] };
       }
 
+      case 'grupr_contract_next_action': {
+        // Never coerce: a missing or non-text next_action must not reach the
+        // hub as "" (which would clear what is there).
+        if (typeof args.contract_id !== 'string' || !args.contract_id.trim()) {
+          return { isError: true, content: [{ type: 'text', text: 'contract_id is required (from grupr_contracts).' }] };
+        }
+        if (typeof args.next_action !== 'string') {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: 'next_action is required and must be text: the next step in plain words, or "" to clear it. Nothing was changed.' }],
+          };
+        }
+        const c = await hubJSON<Record<string, unknown>>(`/contracts/${encodeURIComponent(args.contract_id.trim())}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ next_action: args.next_action }),
+        });
+        const saved = typeof c?.next_action === 'string' && c.next_action ? 'Next action saved.' : 'Next action cleared.';
+        return { content: [{ type: 'text', text: `${saved}\n${JSON.stringify(c, null, 2)}` }] };
+      }
+
       case 'grupr_contract_traces': {
         const n = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(200, Math.floor(args.limit))) : 50;
         const list = await hubJSON<Record<string, unknown>[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
@@ -1651,9 +1703,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? ' The human said no — do not retry; explain in the room instead.'
           : err.code === 'approval_timeout'
             ? ' Nobody decided in time and the request was cancelled. Ask in the room, then call again.'
-            : err.status === 503
-              ? ' Workspaces are not enabled on this Grupr server.'
-              : '';
+            : err.code === 'contract_not_assignee'
+              ? " Only the assignee writes a contract's next action; post what you would have written in the room instead."
+              : err.code === 'contract_closed'
+                ? ' The contract is done or cancelled; nothing more is written to it.'
+                : err.status === 503
+                  ? ' Workspaces are not enabled on this Grupr server.'
+                  : '';
       return {
         isError: true,
         content: [
