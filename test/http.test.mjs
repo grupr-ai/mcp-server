@@ -140,7 +140,9 @@ async function freePort() {
   return port;
 }
 
-async function waitFor(url, ms = 15000) {
+// 60 s: on a busy Windows machine the server takes 13 to 25 s to load right
+// after a build (measured 2026-11-18); 15 s failed the whole suite there.
+async function waitFor(url, ms = 60000) {
   const until = Date.now() + ms;
   while (Date.now() < until) {
     try {
@@ -150,6 +152,35 @@ async function waitFor(url, ms = 15000) {
     await new Promise((r) => setTimeout(r, 150));
   }
   throw new Error('server did not come up: ' + url);
+}
+
+// A contract as the agent hub answers it (D-171: inputs, next action, assignee).
+const CONTRACT_ID = '11111111-1111-4111-8111-111111111111';
+const NOT_MINE_ID = '22222222-2222-4222-8222-222222222222';
+const contract = {
+  contract_id: CONTRACT_ID,
+  title: 'Q3 summary',
+  goal: 'The summary is in Room Files.',
+  status: 'active',
+  inputs: [
+    { kind: 'file', path: 'specs/brief.md', grupr_id: '33333333-3333-4333-8333-333333333333', room: 'Ops' },
+    { kind: 'file', path: 'data/q3.csv', grupr_id: '33333333-3333-4333-8333-333333333333', room: 'Ops', missing: true },
+    { kind: 'note', text: 'Use the Q3 numbers.' },
+  ],
+  next_action: 'Read the brief.',
+  next_action_at: '2026-11-18T20:00:00Z',
+  assignee: { agent_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'Writer', handle: 'writer' },
+  assigned_to_you: true,
+  remaining: {},
+};
+const contractWrites = [];
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (d) => (raw += d));
+    req.on('end', () => resolve(raw));
+  });
 }
 
 before(async () => {
@@ -166,6 +197,23 @@ before(async () => {
     if (req.headers.authorization !== `Bearer ${GOOD}`) {
       res.writeHead(401);
       res.end(JSON.stringify({ errors: [{ code: 'unauthorized', message: 'Invalid, expired or revoked access token' }] }));
+      return;
+    }
+    if (req.url === '/api/v1/agent-hub/contracts' && req.method === 'GET') {
+      res.writeHead(200);
+      res.end(JSON.stringify({ data: [contract] }));
+      return;
+    }
+    if (req.url.startsWith('/api/v1/agent-hub/contracts/') && req.method === 'PATCH') {
+      contractWrites.push({ url: req.url, type: req.headers['content-type'] || '', raw });
+      if (req.url.endsWith(NOT_MINE_ID)) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ errors: [{ code: 'contract_not_assignee', message: "Only the contract's assignee can set its next action." }] }));
+        return;
+      }
+      const sent = JSON.parse(raw);
+      res.writeHead(200);
+      res.end(JSON.stringify({ data: { ...contract, next_action: sent.next_action, next_action_agent_id: contract.assignee.agent_id } }));
       return;
     }
     const routed = roomRoute(req, new URL(req.url, 'http://hub.test'), body);
@@ -267,7 +315,7 @@ test('an MCP client lists annotated tools and calls one as its bearer', async ()
 test('the two new tools are listed with honest annotations, and poll and wait are no longer read-only', async () => {
   const client = await connect();
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 39, 'tool count (README says 39)');
+  assert.equal(tools.length, 40, 'tool count (README says 40)');
   const by = Object.fromEntries(tools.map((t) => [t.name, t]));
 
   const read = by.grupr_room_brief_read;
@@ -439,5 +487,71 @@ test('the room brief: read, write, the 16 KB cap, and a room the agent is not in
     assert.equal(r.isError, true, name);
     assert.match(textOf(r), /403 forbidden/, name);
   }
+  await client.close();
+});
+
+test('contract tools carry the handoff fields, and the assignee writes the next action and nothing else', async () => {
+  const transport = new StreamableHTTPClientTransport(new URL(mcpURL), {
+    requestInit: { headers: { Authorization: `Bearer ${GOOD}` } },
+  });
+  const client = new Client({ name: 'test', version: '0.0.0' });
+  await client.connect(transport);
+  const text = (r) => r.content.map((c) => c.text).join('\n');
+
+  const { tools } = await client.listTools();
+  const tool = tools.find((t) => t.name === 'grupr_contract_next_action');
+  assert.ok(tool, 'grupr_contract_next_action listed');
+  assert.equal(tool.annotations?.readOnlyHint, false, 'a write tool is not read-only');
+  assert.equal(tool.annotations?.destructiveHint, false);
+  assert.equal(tool.annotations?.openWorldHint, false);
+  assert.ok(tool.title && tool.annotations?.title === tool.title);
+  assert.deepEqual(tool.inputSchema.required, ['contract_id', 'next_action']);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ['contract_id', 'next_action'], 'it takes nothing but the next action');
+  assert.equal(tool.inputSchema.properties.next_action.maxLength, 500);
+  for (const name of ['grupr_contracts', 'grupr_contract', 'grupr_contract_traces']) {
+    assert.equal(tools.find((t) => t.name === name).annotations?.readOnlyHint, true, `${name} stays read-only`);
+  }
+
+  // Reading: inputs (a missing file is marked), next action, assignee.
+  const listed = JSON.parse(text(await client.callTool({ name: 'grupr_contracts', arguments: {} })));
+  assert.equal(listed.length, 1);
+  assert.deepEqual(listed[0].inputs.map((i) => i.kind), ['file', 'file', 'note']);
+  assert.equal(listed[0].inputs[1].missing, true);
+  assert.equal(listed[0].next_action, 'Read the brief.');
+  assert.equal(listed[0].assignee.handle, 'writer');
+  assert.equal(listed[0].assigned_to_you, true);
+
+  // Writing: one PATCH, next_action and nothing else in the body.
+  const words = 'Outline drafted. Next: the numbers table.';
+  const saved = await client.callTool({
+    name: 'grupr_contract_next_action',
+    arguments: { contract_id: CONTRACT_ID, next_action: words, status: 'cancel', title: 'smuggled' },
+  });
+  assert.ok(!saved.isError, text(saved));
+  assert.ok(text(saved).startsWith('Next action saved.'), text(saved));
+  assert.equal(JSON.parse(text(saved).split('\n').slice(1).join('\n')).next_action, words);
+  assert.equal(contractWrites.length, 1);
+  assert.equal(contractWrites[0].url, `/api/v1/agent-hub/contracts/${CONTRACT_ID}`);
+  assert.match(contractWrites[0].type, /application\/json/);
+  assert.deepEqual(JSON.parse(contractWrites[0].raw), { next_action: words }, 'only next_action is sent');
+
+  // "" clears, and says so.
+  const cleared = await client.callTool({ name: 'grupr_contract_next_action', arguments: { contract_id: CONTRACT_ID, next_action: '' } });
+  assert.ok(text(cleared).startsWith('Next action cleared.'), text(cleared));
+  assert.deepEqual(JSON.parse(contractWrites[1].raw), { next_action: '' });
+
+  // A call without the words (or with something that is not text) changes
+  // nothing: it must never reach the hub as "".
+  for (const args of [{ contract_id: CONTRACT_ID }, { contract_id: CONTRACT_ID, next_action: 7 }, { contract_id: CONTRACT_ID, next_action: null }, { next_action: 'x' }]) {
+    const r = await client.callTool({ name: 'grupr_contract_next_action', arguments: args });
+    assert.equal(r.isError, true, JSON.stringify(args));
+  }
+  assert.equal(contractWrites.length, 2, 'refused calls never reached the hub');
+
+  // Not the assignee: the hub's refusal, with what to do instead.
+  const refused = await client.callTool({ name: 'grupr_contract_next_action', arguments: { contract_id: NOT_MINE_ID, next_action: 'mine' } });
+  assert.equal(refused.isError, true);
+  assert.ok(text(refused).includes('403 contract_not_assignee'), text(refused));
+  assert.ok(text(refused).includes('in the room instead'), text(refused));
   await client.close();
 });
