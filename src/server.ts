@@ -28,6 +28,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { GruprClient, GruprAuthError, GruprError } from '@grupr/sdk';
 import type { Message } from '@grupr/sdk';
+import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 
@@ -793,6 +794,8 @@ const TOOLS = [
       required: ['mail_id'],
     },
   },
+  // Joining a room by invite link (join.ts; each carries its own annotations).
+  ...JOIN_TOOLS,
 ];
 
 // ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
@@ -1132,6 +1135,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = (request.params.arguments || {}) as Record<string, unknown>;
 
   try {
+    // Joining a room by invite link (join.ts).
+    if (isJoinTool(name)) return await callJoinTool(name, args, hubJSON);
     switch (name) {
       case 'grupr_rooms': {
         const rooms = await hubJSON<Record<string, unknown>[]>('/grups');
