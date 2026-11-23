@@ -236,13 +236,10 @@ before(async () => {
     // Routines: a proposal is recorded as the hub received it and answered
     // "pending"; the listing has one routine of each kind.
     if (req.method === 'POST' && req.url === '/api/v1/agent-hub/workspace/schedule') {
-      let raw = '';
-      req.on('data', (d) => (raw += d));
-      req.on('end', () => {
-        scheduleBodies.push(JSON.parse(raw || '{}'));
-        res.writeHead(202);
-        res.end(JSON.stringify({ data: { status: 'pending', approval_id: 'ap-1' } }));
-      });
+      // The body was read once at the top of this mock (`raw`).
+      scheduleBodies.push(JSON.parse(raw || '{}'));
+      res.writeHead(202);
+      res.end(JSON.stringify({ data: { status: 'pending', approval_id: 'ap-1' } }));
       return;
     }
     if (req.url === '/api/v1/agent-hub/workspace/schedules') {
