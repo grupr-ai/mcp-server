@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.19.0';
+export const SERVER_VERSION = '0.20.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -44,6 +44,12 @@ const MAX_WAIT_SECONDS = Math.max(5, Number(process.env.GRUPR_MAX_WAIT_SECONDS) 
  * instead of waking the caller once per message.
  */
 const BURST_SETTLE_MS = 400;
+
+// ── Read position and room brief ────────────────────────
+/** `after` value that means "from my read position in this room", kept by Grupr. */
+const LAST_READ = 'last_read';
+/** The room brief is capped at 16 KB by the api; checked here first to save the call. */
+const MAX_BRIEF_BYTES = 16 * 1024;
 
 // ── Who is calling ──────────────────────────────────────
 //
@@ -116,6 +122,12 @@ const TOOLS = [
     name: 'grupr_poll_messages',
     description:
       'Poll messages in a grupr this agent is assigned to. Returns chronological message history. Pass `after` (RFC3339 timestamp from a previous message\'s created_at) to get only newer messages — the standard pattern for incremental polling. ' +
+      'To pick up where you left off without keeping a cursor yourself, pass after: "last_read": Grupr keeps a read position for this agent in each room and returns only what you have not acknowledged, oldest first. ' +
+      'Add ack: true to move that position to the newest message this call returns (it never moves backwards), so the next call starts after it; without ack the same messages come back next time. ' +
+      'On your FIRST read of a room (no read position yet) after: "last_read" returns the room\'s newest page (up to limit), OLDEST FIRST, flagged first_read: true, and earlier_available says whether older messages exist: ' +
+      'an agent that has never read a room has nowhere it left off, the room brief is where the context lives, and older history stays reachable with an explicit `after` timestamp. ' +
+      'A reply another agent is still writing is held back until it is finished, and is never returned twice. ' +
+      'This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
       'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
     inputSchema: {
       type: 'object',
@@ -126,7 +138,13 @@ const TOOLS = [
         },
         after: {
           type: 'string',
-          description: 'RFC3339 timestamp — return only messages strictly after this time.',
+          description:
+            'RFC3339 timestamp — return only messages strictly after this time. Or the word "last_read" — return only messages after this agent\'s read position in the room.',
+        },
+        ack: {
+          type: 'boolean',
+          description:
+            'Move this agent\'s read position in the room to the newest message this call returns. Default false. Never moves the position backwards.',
         },
         limit: {
           type: 'number',
@@ -146,7 +164,10 @@ const TOOLS = [
       'This is the preferred way to follow a room: it replaces sleep-then-poll loops. ' +
       'CORRECTNESS: always pass your own processed cursor as `after` and advance it only after you have handled a message. ' +
       'The underlying delivery is a WebSocket with an HTTP backlog drain on every call, so anything missed while disconnected ' +
-      '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state.',
+      '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state. ' +
+      'Instead of your own cursor you may pass after: "last_read": the wait starts from the read position Grupr keeps for this agent in the room, and returns at once if anything is unread ' +
+      '(with no read position yet it returns the room\'s newest page at once, oldest first, flagged first_read: true, as grupr_poll_messages does; an empty room waits from now onward). Add ack: true to move the read position to the newest finished message this call returns; ' +
+      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -157,7 +178,12 @@ const TOOLS = [
         after: {
           type: 'string',
           description:
-            'RFC3339 timestamp — the created_at of the last message you processed. Return only messages strictly after it. Omit to wait for messages from now onward.',
+            'RFC3339 timestamp — the created_at of the last message you processed. Return only messages strictly after it. Or the word "last_read" — wait from this agent\'s read position in the room. Omit to wait for messages from now onward.',
+        },
+        ack: {
+          type: 'boolean',
+          description:
+            'Move this agent\'s read position in the room to the newest finished message this call returns. Default false. Never moves the position backwards.',
         },
         timeout_seconds: {
           type: 'number',
@@ -251,13 +277,23 @@ const TOOLS = [
       "List the task contracts that bind you: your own and those of rooms you are in. A contract is the owner's statement of what done " +
       'looks like (a goal and acceptance checks) with a budget (runs, sandbox seconds, lens calls, deadline). Every command you run with ' +
       'grupr_workspace_run is recorded against the contract that applies (the one you name, else the room\'s, else yours), refused once ' +
-      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room), and graded against the checks into a ' +
-      'pass/fail trace. Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply.',
+      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room). The checks say what the owner will hold ' +
+      'the work to; grading runs against them into pass/fail traces is not switched on yet. ' +
+      'Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply. ' +
+      'A contract is also the handoff. `inputs` is what the work starts from, in order: Room Files (kind "file": read one with ' +
+      'grupr_room_file_read, passing its `grupr_id` and `path`; `missing: true` means it is no longer in Room Files, so say so in the ' +
+      'room instead of guessing) and short notes (kind "note"). `next_action` is the next step in words, with `next_action_at`, ' +
+      '`next_action_author` ("owner" or "agent"; absent when there is none) and, when an agent wrote it, `next_action_agent_id` (absent ' +
+      'once that agent is deleted). `assignee` is the agent the contract is handed to (null: ' +
+      'nobody), and `assigned_to_you` says whether that is you: if it is, keep `next_action` current with grupr_contract_next_action.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'grupr_contract',
-    description: 'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused.',
+    description:
+      'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused, and the ' +
+      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (with ' +
+      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`.',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
@@ -268,7 +304,7 @@ const TOOLS = [
     name: 'grupr_contract_traces',
     description:
       "The pass/fail traces of runs graded under a contract, newest first: verdict, each check's result and note, lens calls spent. " +
-      'Read the latest one to see why a run failed before you try again.',
+      'Grading is not switched on yet, so this reads empty for now; once it is, read the latest trace to see why a run failed before you try again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -276,6 +312,28 @@ const TOOLS = [
         limit: { type: 'number', description: 'Newest traces to return (default 50, max 200).' },
       },
       required: ['contract_id'],
+    },
+  },
+  {
+    name: 'grupr_contract_next_action',
+    description:
+      'Write the next action of a task contract you are the assignee of (`assigned_to_you: true` in grupr_contracts): what is done and ' +
+      'what comes next, in plain words, up to 500 characters, so whoever picks the work up (you after a restart, another agent, the ' +
+      'owner) can go on without replaying the room. It replaces the previous next action and records that you wrote it; pass "" to ' +
+      'clear it. Write it before you stop working and whenever the next step changes. This is the only thing an agent can change on a ' +
+      "contract: its goal, checks, budget, inputs and assignee are the owner's. Refused with 403 contract_not_assignee when the " +
+      'contract is not assigned to you, and with 409 contract_closed once it is done or cancelled. Returns the contract as it now reads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contract_id: { type: 'string', description: 'From grupr_contracts.' },
+        next_action: {
+          type: 'string',
+          maxLength: 500,
+          description: 'The next step, in plain words (up to 500 characters). An empty string clears it.',
+        },
+      },
+      required: ['contract_id', 'next_action'],
     },
   },
   {
@@ -299,8 +357,8 @@ const TOOLS = [
       'Standing permissions the owner has granted for this agent auto-approve (auto_approved: true). ' +
       'Commands run under /bin/sh in /home/user by default; files persist between calls; the sandbox pauses after ~5 idle minutes ' +
       'and resumes transparently (running processes do not survive a pause). Output is capped at 512 KB and scrubbed of credential shapes. ' +
-      'If a task contract applies (grupr_contracts) the run is recorded against it, refused with HTTP 409 contract_budget_exhausted once ' +
-      'its budget is used up, and graded against its checks.',
+      'If a task contract applies (grupr_contracts) the run is recorded against it and refused with HTTP 409 contract_budget_exhausted once ' +
+      'its budget is used up.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -380,6 +438,34 @@ const TOOLS = [
         file: { type: 'string', description: 'file_id or the name shown by grupr_room_files.' },
       },
       required: ['grupr_id', 'file'],
+    },
+  },
+  {
+    name: 'grupr_room_brief_read',
+    description:
+      "Read a grupr's room brief: the one short note (the Room File room-brief.md, up to 16 KB of Markdown) where the room keeps what is done and what is next, " +
+      'so whoever picks the work up does not have to replay the chat. Read it first when you come back to a room. Returns the text, its version, and who last wrote it and when; ' +
+      'a room with no brief yet says so. The agent must be assigned to the grupr.',
+    inputSchema: {
+      type: 'object',
+      properties: { grupr_id: { type: 'string', description: 'The grupr (room) id.' } },
+      required: ['grupr_id'],
+    },
+  },
+  {
+    name: 'grupr_room_brief_write',
+    description:
+      "Replace a grupr's room brief (the Room File room-brief.md) with new Markdown. The WHOLE brief is replaced, so read it first and send back everything that should stay. " +
+      'Write it before you stop: what is done, what is next, and anything the next person or agent must know. At most 16 KB of text. ' +
+      'It is a Room File: the previous brief is kept as a version when the room has storage for it, the bytes count against the room owner\'s storage, ' +
+      'and the room is told, as this agent. Sending the same text again changes nothing. The agent must be assigned to the grupr.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        grupr_id: { type: 'string', description: 'The grupr (room) id.' },
+        content: { type: 'string', description: 'The whole brief in Markdown (at most 16 KB). Not empty.' },
+      },
+      required: ['grupr_id', 'content'],
     },
   },
   {
@@ -473,28 +559,44 @@ const TOOLS = [
   {
     name: 'grupr_workspace_schedule',
     description:
-      "Propose a routine: one shell command that runs in this agent's workspace on a cron, with the result posted in the room each time. " +
+      'Propose a routine for this agent, on a cron. Two kinds. ' +
+      "kind \"command\" (default): one shell command that runs in this agent's workspace, with the result posted in the room each time. " +
+      'kind \"prompt\": an instruction of up to 2,000 characters for this agent itself, e.g. "Write the morning brief in this room": at each firing Grupr posts it in the room ' +
+      "as the agent's owner (\"Scheduled by <owner> for @agent: ...\") and calls this agent's webhook for that room (room webhook, else wake webhook); with no webhook the agent sees it " +
+      'the next time it reads the room. A prompt routine uses no workspace and no sandbox time, and takes only grupr_id, prompt, cron, timezone and label. ' +
       "A human must approve the proposal once (an approval card appears in the room you name and on the owner's dashboard); after that the " +
-      'routine runs on its own without asking again, so only propose commands you would be happy to see run unattended. Destructive commands ' +
-      'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines. Returns pending (card raised — do not ' +
-      're-submit; the room is told when it is created) or created (a standing rule allowed it).',
+      'routine runs on its own without asking again, so only propose what you would be happy to see run unattended. Destructive commands ' +
+      'cannot be scheduled, the minimum interval is 5 minutes, and an agent may have at most 20 routines of both kinds together. ' +
+      'A command routine is held to the scripts its command names (python3 x.py, ./run.sh, after a literal cd): each is pinned by hash when it is approved, a file that does not exist yet is recorded as absent, ' +
+      'and a file Grupr cannot pin (too large, outside the workspace, a path the shell decides) is recorded as not pinned, which the approval card says. If a pinned file changes or disappears, or an absent one appears, the next firing ' +
+      'does not run the command and the routine pauses until the owner re-approves it. Files a script loads are not pinned. So tell the owner before you change a routine\'s script. ' +
+      'Returns pending (card raised — do not re-submit; the room is told when it is created). A routine proposal is never approved by a standing "always allow" rule and cannot be approved with edits: a person approves it as proposed, every time.',
     inputSchema: {
       type: 'object',
       properties: {
         grupr_id: { type: 'string', description: 'The grupr (room) the routine belongs to and posts into; the agent must be assigned to it.' },
-        cmd: { type: 'string', description: 'The shell command, exactly as grupr_workspace_run would run it.' },
+        kind: {
+          type: 'string',
+          enum: ['command', 'prompt'],
+          description: 'command (default): run cmd in the workspace. prompt: post the instruction in prompt for this agent; no workspace is used.',
+        },
+        cmd: { type: 'string', description: 'For a command routine: the shell command, exactly as grupr_workspace_run would run it.' },
+        prompt: {
+          type: 'string',
+          description: 'For a prompt routine: the instruction, up to 2,000 characters. Say what to do and where the result goes; it is all the agent is told at each firing.',
+        },
         cron: {
           type: 'string',
           description: 'Five-field cron (minute hour day-of-month month day-of-week), e.g. "0 8 * * 1-5" = weekdays 08:00; or @hourly / @daily / @weekly / @monthly.',
         },
         timezone: { type: 'string', description: 'IANA timezone the cron is read in (default UTC), e.g. America/New_York.' },
         label: { type: 'string', description: 'Short human label, e.g. "Morning report" (≤ 80 chars).' },
-        cwd: { type: 'string', description: 'Working directory (default /home/user).' },
-        timeout_seconds: { type: 'number', description: 'Per-run wall clock, up to 300 (default 300).' },
+        cwd: { type: 'string', description: 'Command routines only. Working directory (default /home/user).' },
+        timeout_seconds: { type: 'number', description: 'Command routines only. Per-run wall clock, up to 300 (default 300).' },
         outputs: {
           type: 'array',
           description:
-            "Up to 5 workspace files to publish into the room's Files after each successful run, e.g. " +
+            "Command routines only. Up to 5 workspace files to publish into the room's Files after each successful run, e.g. " +
             '[{"path":"out/report.md"},{"path":"out/data.csv","name":"reports/data.csv"}]. Default name routines/<basename>; same name replaces (version history kept). ' +
             'This is how a scheduled report reaches people: write the file in the workspace, name it here.',
           items: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' } }, required: ['path'] },
@@ -502,26 +604,28 @@ const TOOLS = [
         inputs: {
           type: 'array',
           description:
-            'Up to 10 URLs Grupr fetches before each run and writes into the workspace, e.g. [{"url":"https://api.example.com/status","path":"in/status.json","connection":"intranet"}]. ' +
+            'Command routines only. Up to 10 URLs Grupr fetches before each run and writes into the workspace, e.g. [{"url":"https://api.example.com/status","path":"in/status.json","connection":"intranet"}]. ' +
             'Each lands at path with a path.meta.json sidecar (status, bytes, ms, error) for the script to read. With a connection, Grupr attaches the stored credential and the URL must be https on its host. ' +
             'This is how a routine reads a private API or page without the credential ever entering the workspace.',
           items: { type: 'object', properties: { url: { type: 'string' }, path: { type: 'string' }, connection: { type: 'string' } }, required: ['url', 'path'] },
         },
-        render: { type: 'boolean', description: 'Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
+        render: { type: 'boolean', description: 'Command routines only. Render Markdown outputs through Documents: name.md + .html + .docx + .pdf in Files.' },
         notify: {
           type: 'string',
           enum: ['always', 'failures', 'output'],
           description:
-            "always (default): post every run's output in the room; failures: post only failing runs; output: post only when the run prints something or fails " +
+            "Command routines only (a prompt routine always posts its instruction). always (default): post every run's output in the room; failures: post only failing runs; output: post only when the run prints something or fails " +
             '(like cron mail-on-output: write the script to stay silent unless there is news, and a silent run also publishes its files quietly).',
         },
       },
-      required: ['grupr_id', 'cmd', 'cron'],
+      required: ['grupr_id', 'cron'],
     },
   },
   {
     name: 'grupr_workspace_schedules',
-    description: "List this agent's routines: schedule, timezone, room, enabled, next and last run, run and failure counts.",
+    description:
+      "List this agent's routines of both kinds: the command or the instruction, schedule, timezone, room, enabled, next and last run, run and failure counts, " +
+      'and why a routine is paused when Grupr paused it (repeated failures, or a script that changed since it was approved: only the owner can re-approve that).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -536,7 +640,8 @@ const TOOLS = [
   {
     name: 'grupr_workspace_schedule_runs',
     description:
-      "What one of this agent's routines did on its recent firings: when, exit code, how long, an excerpt of the output, and what it published to the room's Files. " +
+      "What one of this agent's routines did on its recent firings: when, exit code, how long, an excerpt of the output, and what it published to the room's Files " +
+      '(for a prompt routine: whether the instruction was posted, or why not). ' +
       'Use it to check a routine is healthy before telling a person it is, or to see why it failed. Full output of one run: grupr_workspace_result with its run_id.',
     inputSchema: {
       type: 'object',
@@ -560,7 +665,7 @@ const TOOLS = [
     description:
       "Ask for a recipe to be installed for this agent: Grupr writes the recipe's script into the workspace and schedules it. A human must approve first " +
       '(an approval card shows the recipe and exactly what it will check); nothing is installed until then. Returns pending (do not re-submit; the room is told when it is created) ' +
-      'or created (a standing rule allowed it). Asking again for a recipe you already run updates its parameters after approval and keeps the one routine. ' +
+      'A recipe proposal is never approved by a standing rule: a person approves it, every time. Asking again for a recipe you already run updates its parameters after approval and keeps the one routine. ' +
       'If params.connection names a connection this agent does not have yet, the owner is asked for it instead (a connection request carrying this recipe as its plan; returns awaiting_connection): when they add the value and say yes, the routine is installed.',
     inputSchema: {
       type: 'object',
@@ -811,6 +916,86 @@ function textOrBase64(buf: Buffer): { text?: string; base64?: string; note?: str
   };
 }
 
+// ── Read position ───────────────────────────────────────
+//
+// Grupr keeps, for each agent in each room, the created_at of the newest
+// message the agent acknowledged. `after=last_read` reads from it and `ack=1`
+// moves it to the newest message the call returns; POST .../read moves it to
+// a time. The api never moves it backwards.
+
+interface HubPage {
+  messages: Message[];
+  count: number;
+  nextCursor: string | null;
+  /** The agent's read position after the call; null when it has none. Undefined when the api did not report one. */
+  lastReadAt: string | null | undefined;
+  /** The other half of the position: the id of that newest acknowledged message. */
+  lastReadMessageId: string | null;
+  acked: boolean;
+  /** This was the agent's first read of the room (no position yet): the newest page, oldest first. */
+  firstRead: boolean;
+  /** On a first read: whether older messages exist beyond the page. */
+  earlierAvailable: boolean | undefined;
+}
+
+/** One page of a room's messages straight from the hub, with the read-position meta the SDK does not carry. */
+async function pollHub(gruprId: string, opts: { after?: string; limit?: number; ack?: boolean }): Promise<HubPage> {
+  const q = new URLSearchParams();
+  if (opts.after) q.set('after', opts.after);
+  if (typeof opts.limit === 'number' && Number.isFinite(opts.limit)) q.set('limit', String(Math.floor(opts.limit)));
+  if (opts.ack) q.set('ack', '1');
+  const res = await hubFetch(`/grups/${encodeURIComponent(gruprId)}/messages${q.toString() ? `?${q}` : ''}`);
+  const body: any = await res.json().catch(() => null);
+  if (!res.ok) {
+    const e = body?.errors?.[0];
+    throw new HubError(res.status, e?.code || 'error', e?.message || `HTTP ${res.status}`);
+  }
+  const messages: Message[] = Array.isArray(body?.data) ? body.data : [];
+  const meta = body?.meta ?? {};
+  return {
+    messages,
+    count: typeof meta.count === 'number' ? meta.count : messages.length,
+    nextCursor: meta.next_cursor ?? null,
+    lastReadAt: 'last_read_at' in meta ? (meta.last_read_at ?? null) : undefined,
+    lastReadMessageId: typeof meta.last_read_message_id === 'string' ? meta.last_read_message_id : null,
+    acked: meta.acked === true,
+    firstRead: meta.first_read === true,
+    earlierAvailable: typeof meta.earlier_available === 'boolean' ? meta.earlier_available : undefined,
+  };
+}
+
+/**
+ * How far an acknowledgement of these messages may go: the created_at of the
+ * newest one that comes before any reply still being written. A reply that is
+ * still streaming has no text yet; acknowledging it would mark it read empty.
+ */
+function ackTarget(messages: Message[]): Message | null {
+  // Grupr orders messages by (created_at, message_id): the id breaks ties
+  // between messages written in the same microsecond.
+  const ordered = [...messages].sort((a, b) =>
+    a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.message_id < b.message_id ? -1 : a.message_id > b.message_id ? 1 : 0,
+  );
+  let target: Message | null = null;
+  for (const m of ordered) {
+    if ((m as { is_streaming?: boolean }).is_streaming === true) break;
+    target = m;
+  }
+  return target;
+}
+
+/** Move the read position to a message (its exact place in the room's order). Returns where it stands afterwards and whether it moved. */
+async function markRead(gruprId: string, messageId: string): Promise<{ lastReadAt: string | null; lastReadMessageId: string | null; advanced: boolean }> {
+  const r = await hubJSON<{ last_read_at?: string | null; last_read_message_id?: string | null; advanced?: boolean }>(
+    `/grups/${encodeURIComponent(gruprId)}/read`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: messageId }),
+    },
+  );
+  return { lastReadAt: r?.last_read_at ?? null, lastReadMessageId: r?.last_read_message_id ?? null, advanced: r?.advanced === true };
+}
+
 // ── Real-time wait ──────────────────────────────────────
 //
 // Wraps the SDK's WebSocket-backed streamEvents() in a bounded, blocking
@@ -883,6 +1068,31 @@ async function waitForMessages(
 
 // ── Server setup ────────────────────────────────────────
 
+/** What a routine does, for a listing: its instruction (prompt routine) or its command. */
+export function routineWhat(r: Record<string, unknown>): string {
+  if (r.kind === 'prompt') {
+    const text = String(r.prompt ?? '').replace(/\s+/g, ' ').trim();
+    return `instruction "${text.length > 160 ? `${text.slice(0, 159)}…` : text}"`;
+  }
+  return `\`${r.cmd}\``;
+}
+
+/** What a command routine is held to (api migration 130 script_hashes): pinned files with a short hash, absent files, files not pinned and why. */
+export function pinsWord(r: Record<string, unknown>): string {
+  if (r.kind === 'prompt') return '';
+  const pins = Array.isArray(r.script_hashes) ? (r.script_hashes as { path: string; sha256?: string; state?: string; reason?: string }[]) : [];
+  const rel = (p: string) => p.replace(/^\/home\/user\//, '');
+  const pinned = pins.filter((h) => h.state === 'pinned' || (!h.state && h.sha256)).map((h) => `${rel(h.path)} (${(h.sha256 ?? '').slice(0, 8)})`);
+  const absent = pins.filter((h) => h.state === 'absent').map((h) => rel(h.path));
+  const unpinned = pins.filter((h) => h.state === 'unpinned' || (!h.state && !h.sha256)).map((h) => `${rel(h.path)} (${h.reason || 'not pinned'})`);
+  const parts: string[] = [];
+  if (pinned.length) parts.push(`pinned ${pinned.join(', ')}`);
+  if (absent.length) parts.push(`absent now: ${absent.join(', ')}`);
+  if (unpinned.length) parts.push(`not pinned: ${unpinned.join(', ')}`);
+  if (!pinned.length && !absent.length) return ` · Grupr cannot detect later changes to what this command runs${parts.length ? ` (${parts.join('; ')})` : ''}`;
+  return ` · ${parts.join('; ')}`;
+}
+
 /**
  * A new Server with every tool registered. stdio connects one for the
  * process; the HTTP entry connects one per request (stateless Streamable
@@ -897,7 +1107,14 @@ const server = new Server(
       'You act as one Grupr agent, inside the rooms (gruprs) that agent is assigned to. Call grupr_rooms first to learn ' +
       'the rooms and their grupr_ids; every other room tool wants one of those ids. Read before you write: poll a room ' +
       'before posting in it. Posts are visible to the people and agents in the room. Workspace commands, mail and ' +
-      'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it.',
+      'routines need a human approval or a standing permission; when something is pending, say so and never resubmit it. ' +
+      'To pick up a room where you left off, without replaying the chat: (1) read the room brief with grupr_room_brief_read; ' +
+      '(2) read what is new with grupr_poll_messages, after: "last_read" and ack: true, which returns only the messages you ' +
+      'have not read and marks them read (on your first read of a room it is the room\'s newest page, oldest first, not the ' +
+      'whole history: the brief is the context, and older messages stay reachable with an explicit after timestamp); ' +
+      '(3) before you stop, write what is done and what is next into the brief with ' +
+      'grupr_room_brief_write (it replaces the whole brief, so keep what should stay), and when you work under a task ' +
+      'contract and have the grupr_contract_next_action tool, set the contract\'s next action as well.',
   },
 );
 
@@ -928,8 +1145,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_poll_messages': {
+        const pollAfter = typeof args.after === 'string' && args.after.trim() ? args.after.trim() : undefined;
+        const pollAck = args.ack === true;
+        if (pollAfter === LAST_READ || pollAck) {
+          // The read position lives on the api; the SDK's poll carries neither
+          // ack nor the position, so this path talks to the hub directly.
+          const page = await pollHub(String(args.grupr_id), {
+            after: pollAfter,
+            limit: typeof args.limit === 'number' ? args.limit : undefined,
+            ack: pollAck,
+          });
+          const fromPosition = pollAfter === LAST_READ;
+          const firstRead = fromPosition && page.firstRead;
+          const earlier =
+            page.earlierAvailable === true
+              ? ' Older messages exist: read them with an explicit `after` timestamp if the brief does not cover them.'
+              : page.earlierAvailable === false
+                ? ' Nothing older exists.'
+                : '';
+          let note: string;
+          if (firstRead && page.messages.length === 0) {
+            note = 'Your first read of this room: nothing to read yet (the room is empty, or its newest messages are replies still being written).' + earlier;
+          } else if (firstRead && page.acked) {
+            note =
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              `Marked read: your read position is now ${page.lastReadAt}.` +
+              earlier;
+          } else if (firstRead) {
+            note =
+              `Your first read of this room: its newest ${page.messages.length} message(s), oldest first. ` +
+              'Not acknowledged: pass ack: true to start your read position at the newest of them.' +
+              earlier;
+          } else if (page.messages.length === 0) {
+            note = fromPosition ? 'Nothing new since your read position.' : 'No messages; your read position did not move.';
+          } else if (page.acked) {
+            note = `Marked read: your read position is now ${page.lastReadAt}.`;
+          } else if (pollAck) {
+            note = `Your read position did not move (it is already at ${page.lastReadAt ?? 'a later message'}, or the newest of these is a reply still being written).`;
+          } else {
+            note = 'Not acknowledged: these come back on the next after: "last_read" call until you pass ack: true.';
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    count: page.count,
+                    next_cursor: page.nextCursor,
+                    last_read_at: page.lastReadAt ?? null,
+                    last_read_message_id: page.lastReadMessageId,
+                    acked: page.acked,
+                    ...(fromPosition ? { first_read: firstRead } : {}),
+                    ...(page.earlierAvailable !== undefined ? { earlier_available: page.earlierAvailable } : {}),
+                    messages: page.messages,
+                    note,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
         const result = await session().client.pollMessages(String(args.grupr_id), {
-          after: args.after as string | undefined,
+          after: pollAfter,
           limit: typeof args.limit === 'number' ? args.limit : undefined,
         });
         return {
@@ -952,7 +1232,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'grupr_wait_for_messages': {
         const gruprId = String(args.grupr_id);
-        const after = typeof args.after === 'string' ? args.after : undefined;
+        const rawAfter = typeof args.after === 'string' && args.after.trim() ? args.after.trim() : undefined;
+        const waitAck = args.ack === true;
+        const fromPosition = rawAfter === LAST_READ;
         const requested =
           typeof args.timeout_seconds === 'number'
             ? args.timeout_seconds
@@ -961,12 +1243,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           Math.min(Math.max(1, requested), MAX_WAIT_SECONDS) * 1000;
 
         const startedAt = Date.now();
-        const { messages, reason } = await waitForMessages(
-          gruprId,
-          after,
-          waitMs,
-        );
+        let after = fromPosition ? undefined : rawAfter;
+        let messages: Message[] = [];
+        let reason: 'message' | 'timeout' = 'timeout';
+        let lastReadAt: string | null | undefined;
+        let lastReadMessageId: string | null = null;
+        let firstRead = false;
+        let earlierAvailable: boolean | undefined;
+        if (fromPosition) {
+          // Resolve the read position first: anything unread returns at once.
+          // With no position yet this is the agent's first read of the room:
+          // its newest page, oldest first, as grupr_poll_messages gives it
+          // (an empty room waits from now onward).
+          const page = await pollHub(gruprId, { after: LAST_READ, limit: 50 });
+          lastReadAt = page.lastReadAt;
+          lastReadMessageId = page.lastReadMessageId;
+          firstRead = page.firstRead;
+          earlierAvailable = page.earlierAvailable;
+          if (typeof lastReadAt === 'string') after = lastReadAt;
+          if (page.messages.length > 0) {
+            messages = page.messages;
+            reason = 'message';
+            after = messages[messages.length - 1].created_at;
+          }
+        }
+        if (messages.length === 0) {
+          ({ messages, reason } = await waitForMessages(gruprId, after, waitMs));
+        }
         const waitedMs = Date.now() - startedAt;
+
+        // ack: move the read position to the newest finished message returned.
+        let acked = false;
+        if (waitAck && messages.length > 0) {
+          const target = ackTarget(messages);
+          if (target !== null) {
+            const marked = await markRead(gruprId, target.message_id);
+            lastReadAt = marked.lastReadAt;
+            lastReadMessageId = marked.lastReadMessageId;
+            acked = marked.advanced;
+          }
+        }
 
         // next_cursor is a suggestion, not state: it is only safe to adopt
         // once the caller has actually processed every message returned.
@@ -975,25 +1291,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? messages[messages.length - 1].created_at
             : (after ?? null);
 
+        const firstNote = firstRead ? `Your first read of this room: its newest ${messages.length} message(s), oldest first. ` : '';
+        let note: string;
+        if (messages.length === 0) {
+          note = fromPosition
+            ? 'No new messages before timeout. Call again with after: "last_read".'
+            : 'No new messages before timeout. Call again with the SAME cursor.';
+        } else if (acked) {
+          note = `${firstNote}Marked read: your read position is now ${lastReadAt}.`;
+        } else if (waitAck) {
+          note = 'Your read position did not move (it is already past these, or the newest of them is a reply still being written).';
+        } else if (fromPosition) {
+          note = 'Not acknowledged: these come back on the next after: "last_read" call until you pass ack: true.';
+        } else {
+          note = 'Advance your cursor to next_cursor only after processing every message above.';
+        }
+
+        const payload: Record<string, unknown> = {
+          count: messages.length,
+          reason,
+          waited_ms: waitedMs,
+          next_cursor: nextCursor,
+          messages,
+          note,
+        };
+        if (fromPosition || waitAck) {
+          payload.last_read_at = lastReadAt ?? null;
+          payload.last_read_message_id = lastReadMessageId;
+          payload.acked = acked;
+        }
+        if (fromPosition) {
+          payload.first_read = firstRead;
+          if (earlierAvailable !== undefined) payload.earlier_available = earlierAvailable;
+        }
+
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(
-                {
-                  count: messages.length,
-                  reason,
-                  waited_ms: waitedMs,
-                  next_cursor: nextCursor,
-                  messages,
-                  note:
-                    messages.length === 0
-                      ? 'No new messages before timeout. Call again with the SAME cursor.'
-                      : 'Advance your cursor to next_cursor only after processing every message above.',
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(payload, null, 2),
             },
           ],
         };
@@ -1088,6 +1424,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'grupr_contract': {
         const c = await hubJSON<Record<string, unknown>>(`/contracts/${encodeURIComponent(String(args.contract_id))}`);
         return { content: [{ type: 'text', text: JSON.stringify(c, null, 2) }] };
+      }
+
+      case 'grupr_contract_next_action': {
+        // Never coerce: a missing or non-text next_action must not reach the
+        // hub as "" (which would clear what is there).
+        if (typeof args.contract_id !== 'string' || !args.contract_id.trim()) {
+          return { isError: true, content: [{ type: 'text', text: 'contract_id is required (from grupr_contracts).' }] };
+        }
+        if (typeof args.next_action !== 'string') {
+          return {
+            isError: true,
+            content: [{ type: 'text', text: 'next_action is required and must be text: the next step in plain words, or "" to clear it. Nothing was changed.' }],
+          };
+        }
+        const c = await hubJSON<Record<string, unknown>>(`/contracts/${encodeURIComponent(args.contract_id.trim())}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ next_action: args.next_action }),
+        });
+        const saved = typeof c?.next_action === 'string' && c.next_action ? 'Next action saved.' : 'Next action cleared.';
+        return { content: [{ type: 'text', text: `${saved}\n${JSON.stringify(c, null, 2)}` }] };
       }
 
       case 'grupr_contract_traces': {
@@ -1349,12 +1706,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_workspace_schedule': {
+        // The api decides the kind (and refuses a mix); here a missing kind
+        // with an instruction and no command means a prompt routine.
+        const prompt = typeof args.prompt === 'string' && args.prompt.trim() ? args.prompt : undefined;
+        const cmd = typeof args.cmd === 'string' && args.cmd.trim() ? args.cmd : undefined;
+        const kind = typeof args.kind === 'string' && args.kind ? args.kind : prompt && !cmd ? 'prompt' : 'command';
+        const isPrompt = kind === 'prompt';
         const res = await hubFetch('/workspace/schedule', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             grupr_id: String(args.grupr_id),
-            cmd: String(args.cmd),
+            kind,
+            prompt,
+            cmd,
             cron: String(args.cron),
             timezone: typeof args.timezone === 'string' && args.timezone ? args.timezone : undefined,
             label: typeof args.label === 'string' && args.label ? args.label : undefined,
@@ -1378,14 +1743,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new HubError(res.status, e?.code ?? 'error', e?.message ?? `HTTP ${res.status}`);
         }
         const d = body?.data ?? {};
+        const what = isPrompt ? 'Prompt routine' : 'Routine';
+        const then = isPrompt
+          ? ' At each firing the instruction is posted in the room as the owner and this agent\'s webhook for that room is called; no workspace is used.'
+          : '';
         if (res.status === 202 || d.status === 'pending') {
           return {
             content: [
               {
                 type: 'text',
                 text:
-                  `Routine proposed — approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
-                  'When someone approves, the routine is created and the room is told; if they deny, nothing is scheduled.',
+                  `${what} proposed — approval ${d.approval_id ?? '?'} is waiting for a member. Do not re-submit. ` +
+                  'When someone approves, the routine is created and the room is told; if they deny, nothing is scheduled.' +
+                  then,
               },
             ],
           };
@@ -1395,7 +1765,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Routine created (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.`,
+              text:
+                `${what} created: schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` +
+                then,
             },
           ],
         };
@@ -1408,7 +1780,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const lines = list.map(
           (r) =>
-            `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}\`${r.cmd}\` · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
+            `- ${r.schedule_id} · ${r.label ? `${r.label}: ` : ''}${routineWhat(r)} · ${r.cron} ${r.timezone} · room ${r.grupr_id} · ` +
             `${r.enabled ? 'on' : 'paused'} · next ${r.next_run_at ?? '—'} · last ${r.last_run_at ? `${r.last_run_at} (${r.last_status}${typeof r.last_exit_code === 'number' ? `, exit ${r.last_exit_code}` : ''})` : 'never'} · ` +
             `${r.runs ?? 0} runs, ${r.failures ?? 0} failed` +
             (Array.isArray(r.outputs) && (r.outputs as { name?: string; path?: string }[]).length > 0
@@ -1416,7 +1788,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               : '') +
             (r.notify === 'failures' ? ' · posts failures only' : r.notify === 'output' ? ' · posts when it prints or fails' : '') +
             (typeof r.consecutive_failures === 'number' && r.consecutive_failures > 0 ? ` · FAILING: ${r.consecutive_failures} in a row` : '') +
-            (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : ''),
+            (r.auto_paused_at ? ' · paused itself after repeated failures (owner must Resume)' : '') +
+            pinsWord(r) +
+            (r.paused_reason === 'script_changed'
+              ? ` · PAUSED: ${r.paused_detail ? `\`${r.paused_detail}\`` : 'a script'} changed since the routine was approved, so nothing runs until the owner re-approves it on the agent page`
+              : ''),
         );
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }
@@ -1438,7 +1814,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const out = [r.stdout, r.stderr, r.error].filter((x) => typeof x === 'string' && x).join('\n').trim();
           const first = out.split('\n').find((l) => l.trim()) ?? '';
           return (
-            `- ${r.finished_at ?? r.created_at} · ${r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
+            `- ${r.finished_at ?? r.created_at} · ${r.source === 'prompt' ? (r.status === 'done' ? 'instruction posted' : 'not delivered') : r.status}${typeof r.exit_code === 'number' ? ` exit ${r.exit_code}` : ''}` +
             (typeof r.wall_clock_ms === 'number' ? ` · ${r.wall_clock_ms} ms` : '') +
             (ins.length ? ` · fetched ${ins.map((i) => `${i.ok ? 'ok' : 'FAILED'}${i.status ? ` ${i.status}` : ''} ${i.url}${i.connection ? ` via ${i.connection}` : ''}${i.error ? ` (${i.error})` : ''}`).join('; ')}` : '') +
             (pub.length ? ` · published ${pub.map((p) => (p.error ? `${p.name} FAILED (${p.error})` : `${p.name}${p.unchanged ? ' (unchanged)' : ''}`)).join(', ')}` : '') +
@@ -1516,8 +1892,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const sch = d.schedule ?? d;
         return {
-          content: [{ type: 'text', text: `Recipe installed (a standing rule allowed it): schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
+          content: [{ type: 'text', text: `Recipe installed: schedule_id ${sch.schedule_id ?? '?'}, ${sch.cron ?? ''} ${sch.timezone ?? ''}, next run ${sch.next_run_at ?? '?'}.` }],
         };
+      }
+
+      case 'grupr_room_brief_read': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const b = await hubJSON<Record<string, any>>(`/grups/${gid}/brief`);
+        if (!b?.exists) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'This room has no brief yet. Write one with grupr_room_brief_write: what is done, what is next.',
+              },
+            ],
+          };
+        }
+        const who = b.updated_by ? ` by ${b.updated_by}${b.updated_by_agent ? ' (agent)' : ''}` : '';
+        const head =
+          `room-brief.md, version ${b.version ?? '?'}, ${b.size ?? '?'} B, last written ${b.updated_at ?? '?'}${who}` +
+          (b.truncated ? ' [only the first 16 KB is shown; the file is larger]' : '');
+        return { content: [{ type: 'text', text: `${head}\n\n${b.content ?? ''}` }] };
+      }
+
+      case 'grupr_room_brief_write': {
+        const gid = encodeURIComponent(String(args.grupr_id));
+        const content = typeof args.content === 'string' ? args.content : '';
+        if (!content.trim()) {
+          throw new Error('content is required: the whole brief, in Markdown. To remove the brief, delete room-brief.md from the room\'s Files.');
+        }
+        const bytes = Buffer.byteLength(content, 'utf8');
+        if (bytes > MAX_BRIEF_BYTES) {
+          throw new Error(`the brief is ${bytes} bytes; the cap is ${MAX_BRIEF_BYTES} (16 KB). Shorten it: keep what is done and what is next, and move detail into a Room File.`);
+        }
+        const b = await hubJSON<Record<string, any>>(`/grups/${gid}/brief`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        });
+        const text = b?.unchanged
+          ? `The brief already says exactly this (version ${b.version ?? '?'}); nothing changed.`
+          : `Brief saved: version ${b?.version ?? '?'}, ${b?.size ?? bytes} B. The room was told.`;
+        return { content: [{ type: 'text', text }] };
       }
 
       case 'grupr_room_doc_write': {
@@ -1651,9 +2068,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? ' The human said no — do not retry; explain in the room instead.'
           : err.code === 'approval_timeout'
             ? ' Nobody decided in time and the request was cancelled. Ask in the room, then call again.'
-            : err.status === 503
-              ? ' Workspaces are not enabled on this Grupr server.'
-              : '';
+            : err.code === 'contract_not_assignee'
+              ? " Only the assignee writes a contract's next action; post what you would have written in the room instead."
+              : err.code === 'contract_closed'
+                ? ' The contract is done or cancelled; nothing more is written to it.'
+                : err.status === 503
+                  ? ' Workspaces are not enabled on this Grupr server.'
+                  : '';
       return {
         isError: true,
         content: [

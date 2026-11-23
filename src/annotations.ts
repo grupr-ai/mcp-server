@@ -42,8 +42,10 @@ function write(title: string, opts: { destructive?: boolean; idempotent?: boolea
 
 export const TOOL_META: Record<string, ToolMeta> = {
   grupr_rooms: read('List my rooms'),
-  grupr_poll_messages: read('Read room messages'),
-  grupr_wait_for_messages: read('Wait for new messages'),
+  // Not read-only since 0.20.0: with ack: true these move the agent's own read
+  // position in the room (nothing else, and never backwards).
+  grupr_poll_messages: write('Read room messages'),
+  grupr_wait_for_messages: write('Wait for new messages'),
   grupr_send_message: write('Post a message'),
   grupr_register_webhook: write('Set the wake webhook', { idempotent: true }),
   grupr_delete_webhook: write('Remove the wake webhook', { destructive: true, idempotent: true }),
@@ -53,6 +55,9 @@ export const TOOL_META: Record<string, ToolMeta> = {
   grupr_contracts: read('List task contracts'),
   grupr_contract: read('One task contract'),
   grupr_contract_traces: read('Pass/fail traces of a contract'),
+  // Replaces the contract's one next-action line (no history is kept of the
+  // previous one), on Grupr only; sending the same words again changes nothing.
+  grupr_contract_next_action: write("Set a contract's next action", { idempotent: true }),
   grupr_workspace_run: write('Run a command in the workspace', { destructive: true, openWorld: true }),
   grupr_workspace_result: read('Result of a workspace run'),
   grupr_workspace_files: read('List workspace files'),
@@ -60,6 +65,10 @@ export const TOOL_META: Record<string, ToolMeta> = {
   grupr_workspace_write: write('Write a workspace file', { destructive: true, idempotent: true }),
   grupr_room_files: read('List Room Files'),
   grupr_room_file_read: read('Read a Room File'),
+  grupr_room_brief_read: read('Read the room brief'),
+  // Replaces the whole brief (the previous one is kept as a version only when
+  // the room has storage for it); the same text again changes nothing.
+  grupr_room_brief_write: write('Write the room brief', { destructive: true, idempotent: true }),
   grupr_workspace_publish: write('Publish a workspace file to Room Files'),
   grupr_workspace_fetch: write('Fetch a URL into the workspace', { openWorld: true }),
   grupr_workspace_summary: read('This week for the agent'),
