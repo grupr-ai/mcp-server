@@ -29,9 +29,10 @@ import {
 import { GruprClient, GruprAuthError, GruprError } from '@grupr/sdk';
 import type { Message } from '@grupr/sdk';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
+import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.20.0';
+export const SERVER_VERSION = '0.21.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -1119,9 +1120,9 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS.map((t) => ({
+  tools: [...TOOLS, ...QUESTION_TOOLS].map((t) => ({
     ...t,
-    ...(TOOL_META[t.name] ?? {}),
+    ...(TOOL_META[t.name] ?? QUESTION_TOOL_META[t.name] ?? {}),
     description: TOOL_DOCS[t.name] ? `${t.description} Docs: ${TOOL_DOCS[t.name]}` : t.description,
   })),
 }));
@@ -2059,6 +2060,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
+        // Ask the owner (questions.ts).
+        if (isQuestionTool(name)) return await callQuestionTool(name, args, hubJSON);
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (err: unknown) {
