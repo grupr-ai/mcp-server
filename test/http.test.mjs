@@ -358,7 +358,7 @@ test('an MCP client lists annotated tools and calls one as its bearer', async ()
 test('the two new tools are listed with honest annotations, and poll and wait are no longer read-only', async () => {
   const client = await connect();
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 40, 'tool count (README says 40)');
+  assert.equal(tools.length, 42, 'tool count (README says 42)');
   const by = Object.fromEntries(tools.map((t) => [t.name, t]));
 
   const read = by.grupr_room_brief_read;
