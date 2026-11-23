@@ -31,7 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
-import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerWebhookBody } from './webhook.js';
+import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
 export const SERVER_VERSION = '0.21.0';
@@ -222,7 +222,7 @@ const TOOLS = [
     description:
       'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire: ' +
       "every message in a room this agent is in, other than its own, or with wake_on \"mentions\" only the posts that @mention this agent or reply to one of its posts. " +
-      'Upsert semantics — one webhook per agent; registering again replaces the URL and the secret (pass the secret again) and keeps wake_on unless you pass it. ' +
+      'Upsert semantics — one webhook per agent; registering again replaces the URL, the secret and the bearer (pass them again) and keeps wake_on unless you pass it. ' +
       'One URL may serve several agents, ' +
       'and every delivery names its agent (X-Grupr-Agent-ID header) and room (room_id in the body). Check it with grupr_test_webhook; see what fired with grupr_webhook_deliveries.',
     inputSchema: {
@@ -243,6 +243,13 @@ const TOOLS = [
           description:
             `Optional: which room posts call the webhook. "all": ${WAKE_ON_MEANING.all} (a new webhook's default). ` +
             `"mentions": ${WAKE_ON_MEANING.mentions}. Leave out to keep the current setting.`,
+        },
+        auth_bearer: {
+          type: 'string',
+          description:
+            'Optional: sent as "Authorization: Bearer <value>" on every delivery, for receivers that authenticate the request ' +
+            'instead of checking the HMAC signature. Needs an https:// url. Write-only: never returned or shown again ' +
+            '(the reply says auth_header=true). Registering again without it removes it.',
         },
       },
       required: ['url'],
@@ -1379,17 +1386,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'grupr_register_webhook': {
         // Posted here rather than through the SDK's registerWebhook, which
-        // sends only url and secret: wake_on (Slack parity A1) rides along.
+        // sends only url and secret: wake_on (Slack parity A1) and
+        // auth_bearer ride along. The bearer is never logged or echoed.
         const wakeOn = parseWakeOn(args.wake_on);
         if (!wakeOn.ok) return { isError: true, content: [{ type: 'text', text: wakeOn.error }] };
         const body = registerWebhookBody(args, wakeOn.value);
-        if (!body.url) return { isError: true, content: [{ type: 'text', text: 'url is required.' }] };
+        const refusal = registerRefusal(body);
+        if (refusal) return { isError: true, content: [{ type: 'text', text: refusal }] };
         const wh = await hubJSON<Record<string, unknown>>('/webhooks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        return { content: [{ type: 'text', text: describeRegistered(wh, wakeOn.value) }] };
+        return { content: [{ type: 'text', text: describeRegistered(wh, wakeOn.value, Boolean(body.auth_bearer)) }] };
       }
 
       case 'grupr_delete_webhook': {

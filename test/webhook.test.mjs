@@ -4,7 +4,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerWebhookBody } from '../dist/webhook.js';
+import { WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from '../dist/webhook.js';
+
+const BEARER = 'bearer-' + 'z'.repeat(40);
 
 test('the two filters are the api values', () => {
   assert.deepEqual([...WAKE_ON_VALUES], ['all', 'mentions']);
@@ -49,4 +51,36 @@ test('the reply names the filter the hub confirmed, and never claims one an old 
   assert.doesNotMatch(old, /wake_on=mentions:/);
 
   assert.equal(describeRegistered({ webhook_id: 'wh-1', is_active: true }), 'Webhook registered. webhook_id=wh-1 active=true');
+});
+
+test('auth_bearer: sent only when given, and only with an https url', () => {
+  assert.deepEqual(registerWebhookBody({ url: 'https://hook.test/a', auth_bearer: ` ${BEARER} ` }, 'mentions'), {
+    url: 'https://hook.test/a',
+    secret: '',
+    wake_on: 'mentions',
+    auth_bearer: BEARER,
+  });
+  assert.equal('auth_bearer' in registerWebhookBody({ url: 'https://hook.test/a', auth_bearer: '  ' }), false);
+  assert.equal('auth_bearer' in registerWebhookBody({ url: 'https://hook.test/a', auth_bearer: 42 }), false);
+
+  assert.equal(registerRefusal(registerWebhookBody({ url: 'https://hook.test/a', auth_bearer: BEARER })), null);
+  assert.equal(registerRefusal(registerWebhookBody({ url: 'HTTPS://hook.test/a', auth_bearer: BEARER })), null);
+  assert.equal(registerRefusal(registerWebhookBody({ url: 'http://hook.test/a' })), null, 'no bearer: http is the hub\'s call');
+  const refused = registerRefusal(registerWebhookBody({ url: 'http://hook.test/a', auth_bearer: BEARER }));
+  assert.match(refused, /auth_bearer requires an https:\/\/ url/);
+  assert.ok(!refused.includes(BEARER), 'the refusal never quotes the bearer');
+  assert.equal(registerRefusal(registerWebhookBody({ url: ' ' })), 'url is required.');
+});
+
+test('the reply says a bearer is set and never prints it, even if a hub echoed it', () => {
+  const set = describeRegistered({ webhook_id: 'wh-1', is_active: true, wake_on: 'all', auth_header: true, auth_bearer: BEARER }, undefined, true);
+  assert.match(set, /wake_on=all: .*\. auth_header=true: every delivery carries your bearer/);
+  assert.ok(!set.includes(BEARER));
+
+  const noWake = describeRegistered({ webhook_id: 'wh-1', is_active: true, auth_header: true });
+  assert.equal(noWake, 'Webhook registered. webhook_id=wh-1 active=true. auth_header=true: every delivery carries your bearer as an Authorization header; Grupr never shows it again.');
+
+  const unconfirmed = describeRegistered({ webhook_id: 'wh-1', is_active: true, auth_header: false }, undefined, true);
+  assert.match(unconfirmed, /did not confirm the bearer/);
+  assert.doesNotMatch(describeRegistered({ webhook_id: 'wh-1', is_active: true, auth_header: false }), /bearer/);
 });

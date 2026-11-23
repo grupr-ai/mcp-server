@@ -224,7 +224,14 @@ before(async () => {
       webhookBodies.push({ type: req.headers['content-type'] || '', body });
       if (body?.wake_on) webhookWakeOn = body.wake_on;
       res.writeHead(200);
-      res.end(JSON.stringify({ data: { webhook_id: 'wh-1', agent_id: 'agent-1', url: body?.url, is_active: true, auth_header: false, wake_on: webhookWakeOn } }));
+      // The real hub never returns auth_bearer (only auth_header); this one
+      // echoes it on purpose, so the tests show the tool's reply never does.
+      const bearer = body?.auth_bearer ? { auth_bearer: body.auth_bearer } : {};
+      res.end(
+        JSON.stringify({
+          data: { webhook_id: 'wh-1', agent_id: 'agent-1', url: body?.url, is_active: true, auth_header: Boolean(body?.auth_bearer), wake_on: webhookWakeOn, ...bearer },
+        }),
+      );
       return;
     }
     const routed = roomRoute(req, new URL(req.url, 'http://hub.test'), body);
@@ -702,5 +709,34 @@ test('grupr_register_webhook sends wake_on ("only when @mentioned or replied to"
   const noURL = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: '  ', wake_on: 'mentions' } });
   assert.equal(noURL.isError, true);
   assert.equal(webhookBodies.length, sent, 'refused calls never reached the hub');
+  await client.close();
+});
+
+test('grupr_register_webhook sends auth_bearer in the body, never echoes it, and refuses it with an http url', async () => {
+  const client = await connect();
+  const { tools } = await client.listTools();
+  const reg = tools.find((t) => t.name === 'grupr_register_webhook');
+  assert.equal(reg.inputSchema.properties.auth_bearer.type, 'string');
+  assert.deepEqual(reg.inputSchema.required, ['url']);
+  const text = (r) => r.content.map((c) => c.text).join('\n');
+  const BEARER = 'bearer-' + 'q'.repeat(48);
+
+  const set = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'https://hook.test/b', auth_bearer: BEARER } });
+  assert.notEqual(set.isError, true, text(set));
+  assert.deepEqual(webhookBodies.at(-1).body, { url: 'https://hook.test/b', secret: '', auth_bearer: BEARER });
+  assert.match(text(set), /auth_header=true: every delivery carries your bearer/);
+  assert.ok(!text(set).includes(BEARER), 'the reply never shows the bearer, even when the hub echoed it');
+
+  // Left out: not sent (the hub then clears it, as registering again always did).
+  await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'https://hook.test/b' } });
+  assert.equal('auth_bearer' in webhookBodies.at(-1).body, false);
+
+  // Over cleartext: refused here, and the bearer never leaves this server.
+  const sent = webhookBodies.length;
+  const plain = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'http://hook.test/b', auth_bearer: BEARER } });
+  assert.equal(plain.isError, true);
+  assert.match(text(plain), /auth_bearer requires an https:\/\/ url/);
+  assert.ok(!text(plain).includes(BEARER));
+  assert.equal(webhookBodies.length, sent, 'the refused call never reached the hub');
   await client.close();
 });

@@ -134,7 +134,9 @@ since URLs get logged — so a header is the only way in. Registration requires
 handed to anyone on the path.
 
 The value is write-only. It is never returned by the API and never logged;
-the register response reports only `auth_header: true`.
+the register response reports only `auth_header: true`, and the tool's reply
+says `auth_header=true` without the value. Registering again without
+`auth_bearer` removes it.
 
 To be woken only when addressed, pass `wake_on`:
 
@@ -233,7 +235,7 @@ Run as a stdio server with `GRUPR_AGENT_TOKEN` set; point the client at the bina
 
 ## Versioning
 
-- `0.21.0` - current. 44 tools. Adds asking the owner (`grupr_ask_owner`, `grupr_question`), joining a room with an invite link (`grupr_join_room`, `grupr_join_request`) and the webhook wake filter (`wake_on` on `grupr_register_webhook`).
+- `0.21.0` - current. 44 tools. Adds asking the owner (`grupr_ask_owner`, `grupr_question`), joining a room with an invite link (`grupr_join_room`, `grupr_join_request`) and the webhook wake filter (`wake_on` on `grupr_register_webhook`, which now also takes the `auth_bearer` this README always described).
 - `0.15.0` - Built against the live `/api/v1/agent-hub` endpoints via `@grupr/sdk@^0.3.0`. Adds the AgentOS tools: workspace (run, files, publish/fetch), Room Files and Documents, Mail, Routines (schedule, outputs, recipes, run history).
 - `0.4.0` - the previous published release: rooms, messages, waiting for messages and webhooks only; no workspace tools.
 - `0.1.x` - broken; targeted an outdated API surface. Do not use.
