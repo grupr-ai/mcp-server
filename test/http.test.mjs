@@ -23,6 +23,7 @@ let apiPort;
 let child;
 let mcpURL;
 const hubCalls = [];
+const scheduleBodies = [];
 
 // ── The fake hub's rooms (read position and room brief, 0.20.0) ──
 const HUB = '/api/v1/agent-hub';
@@ -230,6 +231,51 @@ before(async () => {
     if (req.url === '/api/v1/agent-hub/workspace') {
       res.writeHead(200);
       res.end(JSON.stringify({ data: { status: 'paused', seen_ip: req.headers['cf-connecting-ip'] || '' } }));
+      return;
+    }
+    // Routines: a proposal is recorded as the hub received it and answered
+    // "pending"; the listing has one routine of each kind.
+    if (req.method === 'POST' && req.url === '/api/v1/agent-hub/workspace/schedule') {
+      let raw = '';
+      req.on('data', (d) => (raw += d));
+      req.on('end', () => {
+        scheduleBodies.push(JSON.parse(raw || '{}'));
+        res.writeHead(202);
+        res.end(JSON.stringify({ data: { status: 'pending', approval_id: 'ap-1' } }));
+      });
+      return;
+    }
+    if (req.url === '/api/v1/agent-hub/workspace/schedules') {
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          data: [
+            { schedule_id: 's1', kind: 'prompt', prompt: 'Write the\nmorning brief.', cmd: '', cron: '0 8 * * 1-5', timezone: 'UTC', grupr_id: 'g1', enabled: true, runs: 2, failures: 0 },
+            {
+              schedule_id: 's2', kind: 'command', cmd: 'python3 jobs/r.py', cron: '0 0 * * *', timezone: 'UTC', grupr_id: 'g1', enabled: false,
+              paused_reason: 'script_changed', paused_detail: 'jobs/r.py', last_status: 'blocked', runs: 3, failures: 0,
+              script_hashes: [
+                { path: '/home/user/jobs/r.py', sha256: '1a2b3c4d5e6f', state: 'pinned' },
+                { path: '/home/user/jobs/later.py', state: 'absent' },
+                { path: 'x.py', state: 'unpinned', reason: 'the shell decides which file this is' },
+              ],
+            },
+            { schedule_id: 's3', kind: 'command', cmd: 'date', cron: '@hourly', timezone: 'UTC', grupr_id: 'g1', enabled: true, runs: 0, failures: 0, script_hashes: [] },
+          ],
+        }),
+      );
+      return;
+    }
+    if (req.url.startsWith('/api/v1/agent-hub/workspace/schedules/s1/runs')) {
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          data: [
+            { run_id: 'r2', source: 'prompt', status: 'failed', error: 'No anthropic API key configured.', created_at: '2026-11-19T13:00:00Z' },
+            { run_id: 'r1', source: 'prompt', status: 'done', stdout: 'Instruction posted in the room for @op.', created_at: '2026-11-18T13:00:00Z' },
+          ],
+        }),
+      );
       return;
     }
     res.writeHead(404);
@@ -553,5 +599,62 @@ test('contract tools carry the handoff fields, and the assignee writes the next 
   assert.equal(refused.isError, true);
   assert.ok(text(refused).includes('403 contract_not_assignee'), text(refused));
   assert.ok(text(refused).includes('in the room instead'), text(refused));
+  await client.close();
+});
+
+test('a prompt routine is proposed with an instruction and no command, and listed as one', async () => {
+  const transport = new StreamableHTTPClientTransport(new URL(mcpURL), {
+    requestInit: { headers: { Authorization: `Bearer ${GOOD}` } },
+  });
+  const client = new Client({ name: 'test', version: '0.0.0' });
+  await client.connect(transport);
+  const text = (r) => r.content.map((c) => c.text).join('\n');
+
+  // The tool takes either kind: cmd is no longer required, and the text says
+  // what a prompt routine does and that a changed script pauses a command one.
+  const { tools } = await client.listTools();
+  const sched = tools.find((t) => t.name === 'grupr_workspace_schedule');
+  assert.deepEqual(sched.inputSchema.required, ['grupr_id', 'cron']);
+  assert.deepEqual(sched.inputSchema.properties.kind.enum, ['command', 'prompt']);
+  assert.ok(sched.inputSchema.properties.prompt, 'prompt is a parameter');
+  assert.match(sched.description, /no sandbox time/);
+  assert.match(sched.description, /pauses until the owner re-approves/);
+  assert.equal(sched.annotations?.readOnlyHint, false);
+
+  const proposed = await client.callTool({
+    name: 'grupr_workspace_schedule',
+    arguments: { grupr_id: 'g1', kind: 'prompt', prompt: 'Write the morning brief.', cron: '0 8 * * 1-5', timezone: 'America/New_York', label: 'Brief' },
+  });
+  assert.match(text(proposed), /^Prompt routine proposed — approval ap-1 is waiting/);
+  assert.match(text(proposed), /no workspace is used/);
+  assert.deepEqual(scheduleBodies.at(-1), {
+    grupr_id: 'g1',
+    kind: 'prompt',
+    prompt: 'Write the morning brief.',
+    cron: '0 8 * * 1-5',
+    timezone: 'America/New_York',
+    label: 'Brief',
+  });
+
+  // With no kind, an instruction alone is a prompt routine and a command alone
+  // a command routine; a blank cmd is not sent as a command.
+  await client.callTool({ name: 'grupr_workspace_schedule', arguments: { grupr_id: 'g1', prompt: 'Check the inbox.', cmd: '  ', cron: '@daily' } });
+  assert.deepEqual(scheduleBodies.at(-1), { grupr_id: 'g1', kind: 'prompt', prompt: 'Check the inbox.', cron: '@daily' });
+  const command = await client.callTool({ name: 'grupr_workspace_schedule', arguments: { grupr_id: 'g1', cmd: 'python3 jobs/r.py', cron: '@daily', notify: 'failures' } });
+  assert.deepEqual(scheduleBodies.at(-1), { grupr_id: 'g1', kind: 'command', cmd: 'python3 jobs/r.py', cron: '@daily', notify: 'failures' });
+  assert.match(text(command), /^Routine proposed — approval ap-1/);
+  assert.doesNotMatch(text(command), /no workspace is used/);
+
+  const listed = text(await client.callTool({ name: 'grupr_workspace_schedules', arguments: {} }));
+  assert.ok(listed.includes('- s1 · instruction "Write the morning brief." · 0 8 * * 1-5 UTC'), listed);
+  assert.ok(listed.includes('- s2 · `python3 jobs/r.py`'), listed);
+  assert.ok(listed.includes('PAUSED: `jobs/r.py` changed since the routine was approved, so nothing runs until the owner re-approves it'), listed);
+  assert.ok(listed.includes('· pinned jobs/r.py (1a2b3c4d); absent now: jobs/later.py; not pinned: x.py (the shell decides which file this is)'), listed);
+  assert.ok(listed.includes('- s3 · `date` · @hourly UTC') && listed.includes('· Grupr cannot detect later changes to what this command runs'), listed);
+  assert.match(sched.description, /recorded as absent/);
+
+  const runs = text(await client.callTool({ name: 'grupr_workspace_schedule_runs', arguments: { schedule_id: 's1' } }));
+  assert.ok(runs.includes('· not delivered · No anthropic API key configured.'), runs);
+  assert.ok(runs.includes('· instruction posted · Instruction posted in the room for @op.'), runs);
   await client.close();
 });
