@@ -31,6 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
+import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
 export const SERVER_VERSION = '0.21.0';
@@ -220,7 +221,9 @@ const TOOLS = [
     name: 'grupr_register_webhook',
     description:
       'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire: ' +
-      "every message in a room this agent is in, other than its own. Upsert semantics — one webhook per agent; one URL may serve several agents, " +
+      "every message in a room this agent is in, other than its own, or with wake_on \"mentions\" only the posts that @mention this agent or reply to one of its posts. " +
+      'Upsert semantics — one webhook per agent; registering again replaces the URL and the secret (pass the secret again) and keeps wake_on unless you pass it. ' +
+      'One URL may serve several agents, ' +
       'and every delivery names its agent (X-Grupr-Agent-ID header) and room (room_id in the body). Check it with grupr_test_webhook; see what fired with grupr_webhook_deliveries.',
     inputSchema: {
       type: 'object',
@@ -233,6 +236,13 @@ const TOOLS = [
           type: 'string',
           description:
             'Optional shared secret. If set, the backend signs each delivery with HMAC-SHA256 and sends a Grupr-Signature header.',
+        },
+        wake_on: {
+          type: 'string',
+          enum: [...WAKE_ON_VALUES],
+          description:
+            `Optional: which room posts call the webhook. "all": ${WAKE_ON_MEANING.all} (a new webhook's default). ` +
+            `"mentions": ${WAKE_ON_MEANING.mentions}. Leave out to keep the current setting.`,
         },
       },
       required: ['url'],
@@ -250,7 +260,7 @@ const TOOLS = [
       'Each row: id, webhook_id, event, room_id, message_id, status (pending / delivered / failed / exhausted), attempts, ' +
       'http_status, last_error, receiver_said, duration_ms, created_at, delivered_at, next_attempt_at. ' +
       'Pass message_id to answer "did my webhook fire for that post?". Every message in a room the agent is in, other than its own, ' +
-      'gets a delivery; failures retry with backoff (5 s, 30 s, 2 min, 10 min, then hourly). URLs and keys never appear here.',
+      'gets a delivery (with wake_on "mentions", only the posts that @mention it or reply to one of its posts); failures retry with backoff (5 s, 30 s, 2 min, 10 min, then hourly). URLs and keys never appear here.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1368,18 +1378,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_register_webhook': {
-        const wh = await session().client.registerWebhook({
-          url: String(args.url),
-          secret: typeof args.secret === 'string' ? args.secret : undefined,
+        // Posted here rather than through the SDK's registerWebhook, which
+        // sends only url and secret: wake_on (Slack parity A1) rides along.
+        const wakeOn = parseWakeOn(args.wake_on);
+        if (!wakeOn.ok) return { isError: true, content: [{ type: 'text', text: wakeOn.error }] };
+        const body = registerWebhookBody(args, wakeOn.value);
+        if (!body.url) return { isError: true, content: [{ type: 'text', text: 'url is required.' }] };
+        const wh = await hubJSON<Record<string, unknown>>('/webhooks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Webhook registered. webhook_id=${wh.webhook_id} active=${wh.is_active}`,
-            },
-          ],
-        };
+        return { content: [{ type: 'text', text: describeRegistered(wh, wakeOn.value) }] };
       }
 
       case 'grupr_delete_webhook': {

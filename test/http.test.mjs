@@ -24,6 +24,9 @@ let child;
 let mcpURL;
 const hubCalls = [];
 const scheduleBodies = [];
+// The fake hub's wake webhook (wake_on, Slack parity A1): omitted keeps what it was.
+const webhookBodies = [];
+let webhookWakeOn = 'all';
 
 // ── The fake hub's rooms (read position and room brief, 0.20.0) ──
 const HUB = '/api/v1/agent-hub';
@@ -215,6 +218,13 @@ before(async () => {
       const sent = JSON.parse(raw);
       res.writeHead(200);
       res.end(JSON.stringify({ data: { ...contract, next_action: sent.next_action, next_action_agent_id: contract.assignee.agent_id } }));
+      return;
+    }
+    if (req.url === '/api/v1/agent-hub/webhooks' && req.method === 'POST') {
+      webhookBodies.push({ type: req.headers['content-type'] || '', body });
+      if (body?.wake_on) webhookWakeOn = body.wake_on;
+      res.writeHead(200);
+      res.end(JSON.stringify({ data: { webhook_id: 'wh-1', agent_id: 'agent-1', url: body?.url, is_active: true, auth_header: false, wake_on: webhookWakeOn } }));
       return;
     }
     const routed = roomRoute(req, new URL(req.url, 'http://hub.test'), body);
@@ -653,5 +663,44 @@ test('a prompt routine is proposed with an instruction and no command, and liste
   const runs = text(await client.callTool({ name: 'grupr_workspace_schedule_runs', arguments: { schedule_id: 's1' } }));
   assert.ok(runs.includes('· not delivered · No anthropic API key configured.'), runs);
   assert.ok(runs.includes('· instruction posted · Instruction posted in the room for @op.'), runs);
+  await client.close();
+});
+
+test('grupr_register_webhook sends wake_on ("only when @mentioned or replied to") and leaves it out when not given', async () => {
+  const client = await connect();
+  const { tools } = await client.listTools();
+  const reg = tools.find((t) => t.name === 'grupr_register_webhook');
+  assert.deepEqual(reg.inputSchema.properties.wake_on.enum, ['all', 'mentions']);
+  assert.deepEqual(reg.inputSchema.required, ['url']);
+  const text = (r) => r.content.map((c) => c.text).join('\n');
+
+  const on = await client.callTool({
+    name: 'grupr_register_webhook',
+    arguments: { url: 'https://hook.test/a', secret: 's3', wake_on: 'mentions' },
+  });
+  assert.notEqual(on.isError, true, text(on));
+  assert.deepEqual(webhookBodies.at(-1), {
+    type: 'application/json',
+    body: { url: 'https://hook.test/a', secret: 's3', wake_on: 'mentions' },
+  });
+  assert.match(text(on), /^Webhook registered\. webhook_id=wh-1 active=true wake_on=mentions: it is called for only posts that @mention this agent/);
+
+  // Left out: not sent, so the hub keeps "mentions".
+  const kept = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'https://hook.test/a' } });
+  assert.deepEqual(webhookBodies.at(-1).body, { url: 'https://hook.test/a', secret: '' });
+  assert.match(text(kept), /wake_on=mentions/);
+
+  const all = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'https://hook.test/a', wake_on: 'all' } });
+  assert.equal(webhookBodies.at(-1).body.wake_on, 'all');
+  assert.match(text(all), /wake_on=all: it is called for every post/);
+
+  // A value the api does not take is refused here, and the hub is not called.
+  const sent = webhookBodies.length;
+  const bad = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: 'https://hook.test/a', wake_on: 'replies' } });
+  assert.equal(bad.isError, true);
+  assert.match(text(bad), /wake_on must be "all" or "mentions"/);
+  const noURL = await client.callTool({ name: 'grupr_register_webhook', arguments: { url: '  ', wake_on: 'mentions' } });
+  assert.equal(noURL.isError, true);
+  assert.equal(webhookBodies.length, sent, 'refused calls never reached the hub');
   await client.close();
 });
