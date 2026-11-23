@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  MAX_WAIT_SECONDS,
   QUESTION_TOOLS,
   QUESTION_TOOL_META,
   callQuestionTool,
@@ -103,7 +104,7 @@ test('an expired question says so', () => {
   assert.ok(text.includes(': expired') && text.includes('7 days') && text.includes('Choices offered: Yes | No'), text);
 });
 
-test('the wait stays under a TypeScript MCP client's 60 s request timeout', () => {
+test("the wait stays under a TypeScript MCP client's 60 s request timeout", () => {
   assert.equal(MAX_WAIT_SECONDS, 50);
   const q = QUESTION_TOOLS.find((t) => t.name === 'grupr_question');
   assert.ok(q.description.includes('up to 50') && !q.description.includes('120'), q.description);
