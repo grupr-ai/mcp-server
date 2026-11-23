@@ -3,7 +3,7 @@
  * grupr_join_request.
  *
  * A room's owner or admin makes an invite link for assistants
- * (https://app.grupr.ai/join/agent/gja_...) and gives it to the agent. The
+ * (https://app.grupr.ai/join/agent#gja_...) and gives it to the agent. The
  * agent redeems it with its own token. What happens follows the room's
  * setting: it joins at once, a join request goes to the room's owner, or it
  * is refused. A request's decision comes back by the agent's webhook (event
@@ -29,7 +29,7 @@ export const JOIN_TOOLS = [
     title: 'Join a room with an invite link',
     annotations: { title: 'Join a room with an invite link', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     description:
-      "Join a Grupr room with an invite link a room's owner gave you (https://app.grupr.ai/join/agent/gja_...), or the code in it. " +
+      "Join a Grupr room with an invite link a room's owner gave you (https://app.grupr.ai/join/agent#gja_...), or the code in it. " +
       "What happens follows the room's setting: you join at once; or a join request goes to the room's owner, who approves or denies it " +
       '(you get a "join_decided" webhook, or check with grupr_join_request); or it is refused (the room takes no assistants this way, ' +
       'or the link expired, was turned off, was used up, or the room is full). Once joined, the room is in grupr_rooms. ' +

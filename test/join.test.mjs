@@ -7,7 +7,7 @@ import { JOIN_TOOLS, MAX_JOIN_WAIT_SECONDS, callJoinTool, describeJoinRequest, i
 
 const ID = '3b9d2e3f-4b5d-4c6e-8f90-a1b2c3d4e5f6';
 const ROOM = '9c8b7a6d-1111-4c6e-8f90-a1b2c3d4e5f6';
-const LINK = 'https://app.grupr.ai/join/agent/gja_' + 'A'.repeat(43);
+const LINK = 'https://app.grupr.ai/join/agent#gja_' + 'A'.repeat(43);
 
 function fakeHub(responses) {
   const calls = [];
