@@ -29,7 +29,7 @@ export const SEARCH_TOOLS = [
       'Search the messages of the rooms this agent is in, newest first. ' +
       'query works like a web search box: every word must appear, "a phrase" in quotes matches in order, or between words matches either, and -word leaves a word out (2 to 200 characters; words match whole, not as prefixes). ' +
       'Narrow it with room_id, from_user_id (that person\'s own posts, never their agents\'), from_agent_id, after / before (YYYY-MM-DD in UTC, or an RFC3339 time), and has_file. ' +
-      'Each result gives the message_id, the room (grupr_id), when it was posted, who posted it (a person\'s user_id or an agent\'s agent_id), a snippet with the matching words in «», and the message text (up to 2,000 characters). ' +
+      'Each result gives the message_id, the room (grupr_id), when it was posted, who posted it (a person\'s user_id or an agent\'s agent_id), a snippet (its parts with hit: true are the matching words), and the message text (up to 2,000 characters), as JSON. ' +
       'You find only what this agent may read: rooms it is in, never deleted or moderated messages, and never another agent\'s post Grupr withheld from the room\'s agents. ' +
       'At most 30 searches a minute. Read-only.',
     inputSchema: {
@@ -96,28 +96,49 @@ export function searchQuery(args: Record<string, unknown>): string {
   return qs.toString();
 }
 
-/** A snippet with the matching words in «». */
-export function markedSnippet(h: SearchHit): string {
-  if (!h.snippet || h.snippet.length === 0) return h.snippet_text ?? '';
-  return h.snippet.map((p) => (p.hit ? `«${p.text}»` : p.text)).join('');
+/** One result as the tool returns it. Message text stays inside JSON strings. */
+export type SearchResult = {
+  message_id: string;
+  grupr_id: string;
+  room_name: string | null;
+  created_at: string | null;
+  from: { type: 'agent'; agent_id: string; name: string | null } | { type: 'person'; user_id: string | null; name: string | null };
+  has_files: boolean;
+  /** The matching part of the text; parts with hit: true are the matches. */
+  snippet: { text: string; hit?: boolean }[];
+  /** The message text, up to 2,000 characters. */
+  text: string | null;
+  text_truncated: boolean;
+};
+
+/** A hit from the agent hub as a result: who posted it is decided by agent_id, never read from the text. */
+export function toResult(h: SearchHit): SearchResult {
+  const snippet = Array.isArray(h.snippet) && h.snippet.length > 0
+    ? h.snippet.map((p) => (p.hit ? { text: String(p.text ?? ''), hit: true } : { text: String(p.text ?? '') }))
+    : h.snippet_text
+      ? [{ text: h.snippet_text }]
+      : [];
+  return {
+    message_id: h.message_id,
+    grupr_id: h.grupr_id,
+    room_name: h.room_name ?? null,
+    created_at: h.created_at ?? null,
+    from: h.agent_id
+      ? { type: 'agent', agent_id: h.agent_id, name: h.sender_name ?? null }
+      : { type: 'person', user_id: h.sender_id ?? null, name: h.sender_name ?? null },
+    has_files: h.has_files === true,
+    snippet,
+    text: typeof h.content === 'string' ? h.content : null,
+    text_truncated: h.content_truncated === true,
+  };
 }
 
-/** What the tool says about one hit. */
-export function describeHit(h: SearchHit): string {
-  const room = h.room_name ? `"${h.room_name}" (grupr_id ${h.grupr_id})` : `grupr_id ${h.grupr_id}`;
-  const who = h.agent_id
-    ? `agent ${h.sender_name ? h.sender_name + ' ' : ''}(agent_id ${h.agent_id})`
-    : `${h.sender_name || 'someone'} (user_id ${h.sender_id ?? '?'})`;
-  const lines = [`- message_id ${h.message_id} in ${room}, ${h.created_at ?? ''}, from ${who}${h.has_files ? ', with files' : ''}`];
-  const snip = markedSnippet(h).trim();
-  if (snip) lines.push(`  Snippet: ${snip}`);
-  if (typeof h.content === 'string') {
-    lines.push(`  Text${h.content_truncated ? ' (first 2,000 characters)' : ''}: ${h.content}`);
-  }
-  return lines.join('\n');
-}
-
-/** Runs grupr_search_messages. Errors (HubError from hubEnvelope) propagate to server.ts's handler. */
+/**
+ * Runs grupr_search_messages. The reply is JSON, like grupr_poll_messages:
+ * a message's text is a string value in it, so a posted message can never
+ * pass itself off as another result or as someone else's words. Errors
+ * (HubError from hubEnvelope) propagate to server.ts's handler.
+ */
 export async function callSearchTool(name: string, args: Record<string, unknown>, hubEnvelope: HubEnvelope): Promise<ToolResult> {
   if (name !== 'grupr_search_messages') throw new Error(`Unknown tool: ${name}`);
   const query = str(args.query ?? args.q);
@@ -126,11 +147,22 @@ export async function callSearchTool(name: string, args: Record<string, unknown>
   }
   const { data, meta } = await hubEnvelope<SearchHit[]>(`/search/messages?${searchQuery(args)}`);
   const hits = Array.isArray(data) ? data : [];
-  const next = typeof meta?.next_cursor === 'string' && meta.next_cursor ? meta.next_cursor : '';
-  if (hits.length === 0) {
-    return { content: [{ type: 'text', text: args.cursor ? 'No more messages match.' : `No messages match ${JSON.stringify(query)} in the rooms this agent is in.` }] };
-  }
-  const head = `${hits.length} message${hits.length === 1 ? '' : 's'} matching ${JSON.stringify(query)}, newest first:`;
-  const tail = next ? `More results: call grupr_search_messages again with the same arguments and cursor "${next}".` : 'That is every match.';
-  return { content: [{ type: 'text', text: [head, ...hits.map(describeHit), tail].join('\n') }] };
+  const next = typeof meta?.next_cursor === 'string' && meta.next_cursor ? meta.next_cursor : null;
+  const note =
+    hits.length === 0
+      ? args.cursor
+        ? 'No more messages match.'
+        : 'No messages match in the rooms this agent is in.'
+      : next
+        ? 'Newest first. More results: call grupr_search_messages again with the same arguments and this next_cursor as cursor.'
+        : 'Newest first. That is every match.';
+  const body = {
+    query,
+    count: hits.length,
+    has_more: next !== null,
+    next_cursor: next,
+    results: hits.map(toResult),
+    note,
+  };
+  return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] };
 }
