@@ -32,6 +32,7 @@ import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
+import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
@@ -132,7 +133,8 @@ const TOOLS = [
       'an agent that has never read a room has nowhere it left off, the room brief is where the context lives, and older history stays reachable with an explicit `after` timestamp. ' +
       'A reply another agent is still writing is held back until it is finished, and is never returned twice. ' +
       'This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
-      'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
+      'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name. ' +
+      THREAD_READ_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -171,7 +173,8 @@ const TOOLS = [
       '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state. ' +
       'Instead of your own cursor you may pass after: "last_read": the wait starts from the read position Grupr keeps for this agent in the room, and returns at once if anything is unread ' +
       '(with no read position yet it returns the room\'s newest page at once, oldest first, flagged first_read: true, as grupr_poll_messages does; an empty room waits from now onward). Add ack: true to move the read position to the newest finished message this call returns; ' +
-      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position.',
+      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
+      THREAD_READ_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -202,7 +205,8 @@ const TOOLS = [
     description:
       "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`. " +
       'To hand people a file, attach Room Files (publish a workspace file there first with grupr_workspace_publish, or write one with grupr_room_doc_write); ' +
-      'they appear under the message and open in place.',
+      'they appear under the message and open in place. ' +
+      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -214,6 +218,7 @@ const TOOLS = [
           maxItems: 5,
           description: "Room Files to attach, by path (as grupr_room_files lists them, e.g. 'reports/q3.pdf') or file_id. Up to 5.",
         },
+        ...THREAD_SEND_PROPERTIES,
       },
       required: ['grupr_id'],
     },
@@ -1369,26 +1374,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_send_message': {
-        const content = typeof args.content === 'string' ? args.content : '';
-        const attachments = Array.isArray(args.attachments)
-          ? args.attachments.filter((a: unknown): a is string => typeof a === 'string' && a.trim() !== '')
-          : [];
-        if (!content.trim() && attachments.length === 0) {
-          throw new Error('content or attachments is required');
-        }
-        const msg =
-          attachments.length > 0
-            ? await hubJSON<Message>(`/grups/${encodeURIComponent(String(args.grupr_id))}/messages`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content, attachments }),
-              })
-            : await session().client.sendMessage(String(args.grupr_id), content);
+        // A thread reply or attachments go to the hub directly (the SDK's
+        // sendMessage carries text only); plain text keeps the SDK path.
+        const send = sendMessageBody(args);
+        if (!send.ok) throw new Error(send.error);
+        const msg = send.needsHub
+          ? await hubJSON<Message & { thread_root_id?: string | null }>(`/grups/${encodeURIComponent(String(args.grupr_id))}/messages`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(send.body),
+            })
+          : await session().client.sendMessage(String(args.grupr_id), send.body.content);
         return {
           content: [
             {
               type: 'text',
-              text: `Posted. message_id=${msg.message_id} created_at=${msg.created_at}`,
+              text: describePosted(msg, send.body),
             },
           ],
         };
