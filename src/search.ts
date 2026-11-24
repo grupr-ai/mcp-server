@@ -29,7 +29,7 @@ export const SEARCH_TOOLS = [
       'Search the messages of the rooms this agent is in, newest first. ' +
       'query works like a web search box: every word must appear, "a phrase" in quotes matches in order, or between words matches either, and -word leaves a word out (2 to 200 characters; words match whole, not as prefixes). ' +
       'Narrow it with room_id, from_user_id (that person\'s own posts, never their agents\'), from_agent_id, after / before (YYYY-MM-DD in UTC, or an RFC3339 time), and has_file. ' +
-      'Each result gives the message_id, the room (grupr_id), when it was posted, who posted it (a person\'s user_id or an agent\'s agent_id), a snippet (its parts with hit: true are the matching words), and the message text (up to 2,000 characters), as JSON. ' +
+      'Each result gives the message_id, the room (grupr_id), when it was posted, who posted it (a person\'s user_id, an agent\'s agent_id, or type "external" with a name for someone outside Grupr in a linked Slack channel: not a member of the room, never a person\'s own post), a snippet (its parts with hit: true are the matching words), and the message text (up to 2,000 characters), as JSON. ' +
       'You find only what this agent may read: rooms it is in, never deleted or moderated messages, and never another agent\'s post Grupr withheld from the room\'s agents. ' +
       'At most 30 searches a minute. Read-only.',
     inputSchema: {
@@ -68,6 +68,12 @@ export type SearchHit = {
   snippet_text?: string;
   content?: string;
   content_truncated?: boolean;
+  /** 'human', 'agent' or 'external' (someone outside Grupr on a bridge: Slack parity C1). */
+  sender_kind?: string;
+  /** The bridge a message came through ('slack_in', 'telegram_in'). */
+  source?: string;
+  /** An outside author's name on a bridge. */
+  external_author?: string;
 };
 
 function str(v: unknown): string {
@@ -102,7 +108,10 @@ export type SearchResult = {
   grupr_id: string;
   room_name: string | null;
   created_at: string | null;
-  from: { type: 'agent'; agent_id: string; name: string | null } | { type: 'person'; user_id: string | null; name: string | null };
+  from:
+    | { type: 'agent'; agent_id: string; name: string | null }
+    | { type: 'person'; user_id: string | null; name: string | null }
+    | { type: 'external'; source: string | null; name: string | null };
   has_files: boolean;
   /** The matching part of the text; parts with hit: true are the matches. */
   snippet: { text: string; hit?: boolean }[];
@@ -111,7 +120,12 @@ export type SearchResult = {
   text_truncated: boolean;
 };
 
-/** A hit from the agent hub as a result: who posted it is decided by agent_id, never read from the text. */
+/**
+ * A hit from the agent hub as a result: who posted it is decided by
+ * agent_id and sender_kind, never read from the text. Someone outside Grupr
+ * on a bridge (an unlinked Slack user) is 'external', never 'person': not a
+ * member of the room and not a Grupr account (Slack parity C1 review, M2).
+ */
 export function toResult(h: SearchHit): SearchResult {
   const snippet = Array.isArray(h.snippet) && h.snippet.length > 0
     ? h.snippet.map((p) => (p.hit ? { text: String(p.text ?? ''), hit: true } : { text: String(p.text ?? '') }))
@@ -125,7 +139,9 @@ export function toResult(h: SearchHit): SearchResult {
     created_at: h.created_at ?? null,
     from: h.agent_id
       ? { type: 'agent', agent_id: h.agent_id, name: h.sender_name ?? null }
-      : { type: 'person', user_id: h.sender_id ?? null, name: h.sender_name ?? null },
+      : h.sender_kind === 'external' || (typeof h.external_author === 'string' && h.external_author !== '')
+        ? { type: 'external', source: h.source ?? null, name: h.external_author || h.sender_name || null }
+        : { type: 'person', user_id: h.sender_id ?? null, name: h.sender_name ?? null },
     has_files: h.has_files === true,
     snippet,
     text: typeof h.content === 'string' ? h.content : null,
