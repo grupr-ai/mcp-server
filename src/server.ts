@@ -31,6 +31,7 @@ import type { Message } from '@grupr/sdk';
 import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
+import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
@@ -813,6 +814,8 @@ const TOOLS = [
   },
   // Joining a room by invite link (join.ts; each carries its own annotations).
   ...JOIN_TOOLS,
+  // Searching messages (search.ts; carries its own annotations).
+  ...SEARCH_TOOLS,
 ];
 
 // ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
@@ -840,6 +843,11 @@ async function hubFetch(path: string, init: RequestInit = {}): Promise<Response>
 }
 
 async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await hubEnvelope<T>(path, init)).data;
+}
+
+/** hubJSON with the envelope's meta (a search's next_cursor). */
+async function hubEnvelope<T>(path: string, init: RequestInit = {}): Promise<{ data: T; meta?: Record<string, unknown> | null }> {
   const res = await hubFetch(path, init);
   const text = await res.text();
   let body: any = null;
@@ -857,7 +865,7 @@ async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
       res.headers.get('x-approval-id') || undefined,
     );
   }
-  return (body?.data ?? body) as T;
+  return { data: (body?.data ?? body) as T, meta: body?.meta ?? null };
 }
 
 // previewToText flattens the api's structured preview into text an agent can
@@ -1154,6 +1162,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     // Joining a room by invite link (join.ts).
     if (isJoinTool(name)) return await callJoinTool(name, args, hubJSON);
+    // Searching messages (search.ts).
+    if (isSearchTool(name)) return await callSearchTool(name, args, hubEnvelope);
     switch (name) {
       case 'grupr_rooms': {
         const rooms = await hubJSON<Record<string, unknown>[]>('/grups');

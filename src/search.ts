@@ -1,0 +1,136 @@
+/**
+ * Search messages (Slack parity B1): grupr_search_messages.
+ *
+ * Full-text search over the messages of the rooms this agent is in, newest
+ * first, through the agent hub's GET /search/messages. Grupr decides what the
+ * agent may find: only rooms it is in, never deleted or moderated messages,
+ * and never another agent's post that Grupr's loop guard withheld from the
+ * room's agents (the same rule as grupr_poll_messages).
+ *
+ * Kept apart from server.ts so it merges cleanly with the other tool work.
+ * The tool carries its own title and annotations, so server.ts only lists
+ * SEARCH_TOOLS with the others and hands its calls here.
+ */
+
+/** server.ts's hubEnvelope: one agent-hub call as the session's agent, with the envelope's meta; HubError on a refusal. */
+export type HubEnvelope = <T>(path: string, init?: RequestInit) => Promise<{ data: T; meta?: Record<string, unknown> | null }>;
+
+type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
+
+export const SEARCH_DEFAULT_LIMIT = 10;
+export const SEARCH_MAX_LIMIT = 50;
+
+export const SEARCH_TOOLS = [
+  {
+    name: 'grupr_search_messages',
+    title: 'Search messages',
+    annotations: { title: 'Search messages', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description:
+      'Search the messages of the rooms this agent is in, newest first. ' +
+      'query works like a web search box: every word must appear, "a phrase" in quotes matches in order, or between words matches either, and -word leaves a word out (2 to 200 characters; words match whole, not as prefixes). ' +
+      'Narrow it with room_id, from_user_id (that person\'s own posts, never their agents\'), from_agent_id, after / before (YYYY-MM-DD in UTC, or an RFC3339 time), and has_file. ' +
+      'Each result gives the message_id, the room (grupr_id), when it was posted, who posted it (a person\'s user_id or an agent\'s agent_id), a snippet with the matching words in «», and the message text (up to 2,000 characters). ' +
+      'You find only what this agent may read: rooms it is in, never deleted or moderated messages, and never another agent\'s post Grupr withheld from the room\'s agents. ' +
+      'At most 30 searches a minute. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The words to search for (2 to 200 characters).' },
+        room_id: { type: 'string', description: 'Optional: search one room (a grupr_id this agent is in). Default: every room it is in.' },
+        from_user_id: { type: 'string', description: "Optional: only this person's own posts (a user_id)." },
+        from_agent_id: { type: 'string', description: "Optional: only this agent's posts (an agent_id)." },
+        after: { type: 'string', description: 'Optional: posted on or after this day (YYYY-MM-DD, UTC) or time (RFC3339).' },
+        before: { type: 'string', description: 'Optional: posted before this day (YYYY-MM-DD, UTC) or time (RFC3339).' },
+        has_file: { type: 'boolean', description: 'Optional: only messages that carry files.' },
+        limit: { type: 'number', description: `Optional: results per call, 1 to ${SEARCH_MAX_LIMIT} (default ${SEARCH_DEFAULT_LIMIT}).` },
+        cursor: { type: 'string', description: 'Optional: the cursor a previous call returned, for the next page.' },
+      },
+      required: ['query'],
+    },
+  },
+];
+
+export function isSearchTool(name: string): boolean {
+  return name === 'grupr_search_messages';
+}
+
+export type SearchHit = {
+  message_id: string;
+  grupr_id: string;
+  room_name?: string;
+  sender_id?: string;
+  agent_id?: string;
+  sender_name?: string;
+  message_type?: string;
+  has_files?: boolean;
+  created_at?: string;
+  snippet?: { text: string; hit?: boolean }[];
+  snippet_text?: string;
+  content?: string;
+  content_truncated?: boolean;
+};
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+/** The agent hub's query string for a call's arguments. */
+export function searchQuery(args: Record<string, unknown>): string {
+  const qs = new URLSearchParams();
+  qs.set('q', str(args.query ?? args.q));
+  const room = str(args.room_id) || str(args.grupr_id);
+  if (room) qs.set('room', room);
+  const fromUser = str(args.from_user_id);
+  if (fromUser) qs.set('from_user', fromUser);
+  const fromAgent = str(args.from_agent_id);
+  if (fromAgent) qs.set('from_agent', fromAgent);
+  const after = str(args.after);
+  if (after) qs.set('after', after);
+  const before = str(args.before);
+  if (before) qs.set('before', before);
+  if (args.has_file === true) qs.set('has_file', 'true');
+  const limit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : SEARCH_DEFAULT_LIMIT;
+  qs.set('limit', String(Math.max(1, Math.min(SEARCH_MAX_LIMIT, limit))));
+  const cursor = str(args.cursor);
+  if (cursor) qs.set('cursor', cursor);
+  return qs.toString();
+}
+
+/** A snippet with the matching words in «». */
+export function markedSnippet(h: SearchHit): string {
+  if (!h.snippet || h.snippet.length === 0) return h.snippet_text ?? '';
+  return h.snippet.map((p) => (p.hit ? `«${p.text}»` : p.text)).join('');
+}
+
+/** What the tool says about one hit. */
+export function describeHit(h: SearchHit): string {
+  const room = h.room_name ? `"${h.room_name}" (grupr_id ${h.grupr_id})` : `grupr_id ${h.grupr_id}`;
+  const who = h.agent_id
+    ? `agent ${h.sender_name ? h.sender_name + ' ' : ''}(agent_id ${h.agent_id})`
+    : `${h.sender_name || 'someone'} (user_id ${h.sender_id ?? '?'})`;
+  const lines = [`- message_id ${h.message_id} in ${room}, ${h.created_at ?? ''}, from ${who}${h.has_files ? ', with files' : ''}`];
+  const snip = markedSnippet(h).trim();
+  if (snip) lines.push(`  Snippet: ${snip}`);
+  if (typeof h.content === 'string') {
+    lines.push(`  Text${h.content_truncated ? ' (first 2,000 characters)' : ''}: ${h.content}`);
+  }
+  return lines.join('\n');
+}
+
+/** Runs grupr_search_messages. Errors (HubError from hubEnvelope) propagate to server.ts's handler. */
+export async function callSearchTool(name: string, args: Record<string, unknown>, hubEnvelope: HubEnvelope): Promise<ToolResult> {
+  if (name !== 'grupr_search_messages') throw new Error(`Unknown tool: ${name}`);
+  const query = str(args.query ?? args.q);
+  if (query.length < 2) {
+    return { isError: true, content: [{ type: 'text', text: 'Give query at least 2 characters to search for.' }] };
+  }
+  const { data, meta } = await hubEnvelope<SearchHit[]>(`/search/messages?${searchQuery(args)}`);
+  const hits = Array.isArray(data) ? data : [];
+  const next = typeof meta?.next_cursor === 'string' && meta.next_cursor ? meta.next_cursor : '';
+  if (hits.length === 0) {
+    return { content: [{ type: 'text', text: args.cursor ? 'No more messages match.' : `No messages match ${JSON.stringify(query)} in the rooms this agent is in.` }] };
+  }
+  const head = `${hits.length} message${hits.length === 1 ? '' : 's'} matching ${JSON.stringify(query)}, newest first:`;
+  const tail = next ? `More results: call grupr_search_messages again with the same arguments and cursor "${next}".` : 'That is every match.';
+  return { content: [{ type: 'text', text: [head, ...hits.map(describeHit), tail].join('\n') }] };
+}
