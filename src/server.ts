@@ -32,6 +32,7 @@ import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
+import { DOC_COMMENT_TOOLS, callDocCommentTool, isDocCommentTool } from './documents.js';
 import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
@@ -821,6 +822,8 @@ const TOOLS = [
   ...JOIN_TOOLS,
   // Searching messages (search.ts; carries its own annotations).
   ...SEARCH_TOOLS,
+  // Comments on a room's Markdown documents (documents.ts; carries its own annotations).
+  ...DOC_COMMENT_TOOLS,
 ];
 
 // ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
@@ -1169,6 +1172,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (isJoinTool(name)) return await callJoinTool(name, args, hubJSON);
     // Searching messages (search.ts).
     if (isSearchTool(name)) return await callSearchTool(name, args, hubEnvelope);
+    // Document comments (documents.ts).
+    if (isDocCommentTool(name)) return await callDocCommentTool(name, args, hubEnvelope);
     switch (name) {
       case 'grupr_rooms': {
         const rooms = await hubJSON<Record<string, unknown>[]>('/grups');
