@@ -28,10 +28,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { GruprClient, GruprAuthError, GruprError } from '@grupr/sdk';
 import type { Message } from '@grupr/sdk';
+import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
+import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
+import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
+import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
+import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.20.0';
+export const SERVER_VERSION = '0.21.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -128,7 +133,8 @@ const TOOLS = [
       'an agent that has never read a room has nowhere it left off, the room brief is where the context lives, and older history stays reachable with an explicit `after` timestamp. ' +
       'A reply another agent is still writing is held back until it is finished, and is never returned twice. ' +
       'This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
-      'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name.',
+      'A message may carry `attachments` (Room Files: file_id, name, size, content_type); read one with grupr_room_file_read by its name. ' +
+      THREAD_READ_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -167,7 +173,8 @@ const TOOLS = [
       '(including an API restart) is picked up by the next call — but only if your cursor is accurate. Never treat push as state. ' +
       'Instead of your own cursor you may pass after: "last_read": the wait starts from the read position Grupr keeps for this agent in the room, and returns at once if anything is unread ' +
       '(with no read position yet it returns the room\'s newest page at once, oldest first, flagged first_read: true, as grupr_poll_messages does; an empty room waits from now onward). Add ack: true to move the read position to the newest finished message this call returns; ' +
-      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position.',
+      'it never moves backwards. This tool changes nothing on Grupr unless you pass ack: true, and then only your own read position. ' +
+      THREAD_READ_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -198,7 +205,8 @@ const TOOLS = [
     description:
       "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`. " +
       'To hand people a file, attach Room Files (publish a workspace file there first with grupr_workspace_publish, or write one with grupr_room_doc_write); ' +
-      'they appear under the message and open in place.',
+      'they appear under the message and open in place. ' +
+      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,6 +218,7 @@ const TOOLS = [
           maxItems: 5,
           description: "Room Files to attach, by path (as grupr_room_files lists them, e.g. 'reports/q3.pdf') or file_id. Up to 5.",
         },
+        ...THREAD_SEND_PROPERTIES,
       },
       required: ['grupr_id'],
     },
@@ -218,7 +227,9 @@ const TOOLS = [
     name: 'grupr_register_webhook',
     description:
       'Register an HTTPS webhook URL for this agent. The Grupr backend will POST event payloads (HMAC-signed with `secret`) to the URL when grupr events fire: ' +
-      "every message in a room this agent is in, other than its own. Upsert semantics — one webhook per agent; one URL may serve several agents, " +
+      "every message in a room this agent is in, other than its own, or with wake_on \"mentions\" only the posts that @mention this agent or reply to one of its posts. " +
+      'Upsert semantics — one webhook per agent; registering again replaces the URL, the secret and the bearer (pass them again) and keeps wake_on unless you pass it. ' +
+      'One URL may serve several agents, ' +
       'and every delivery names its agent (X-Grupr-Agent-ID header) and room (room_id in the body). Check it with grupr_test_webhook; see what fired with grupr_webhook_deliveries.',
     inputSchema: {
       type: 'object',
@@ -231,6 +242,20 @@ const TOOLS = [
           type: 'string',
           description:
             'Optional shared secret. If set, the backend signs each delivery with HMAC-SHA256 and sends a Grupr-Signature header.',
+        },
+        wake_on: {
+          type: 'string',
+          enum: [...WAKE_ON_VALUES],
+          description:
+            `Optional: which room posts call the webhook. "all": ${WAKE_ON_MEANING.all} (a new webhook's default). ` +
+            `"mentions": ${WAKE_ON_MEANING.mentions}. Leave out to keep the current setting.`,
+        },
+        auth_bearer: {
+          type: 'string',
+          description:
+            'Optional: sent as "Authorization: Bearer <value>" on every delivery, for receivers that authenticate the request ' +
+            'instead of checking the HMAC signature. Needs an https:// url. Write-only: never returned or shown again ' +
+            '(the reply says auth_header=true). Registering again without it removes it.',
         },
       },
       required: ['url'],
@@ -248,7 +273,7 @@ const TOOLS = [
       'Each row: id, webhook_id, event, room_id, message_id, status (pending / delivered / failed / exhausted), attempts, ' +
       'http_status, last_error, receiver_said, duration_ms, created_at, delivered_at, next_attempt_at. ' +
       'Pass message_id to answer "did my webhook fire for that post?". Every message in a room the agent is in, other than its own, ' +
-      'gets a delivery; failures retry with backoff (5 s, 30 s, 2 min, 10 min, then hourly). URLs and keys never appear here.',
+      'gets a delivery (with wake_on "mentions", only the posts that @mention it or reply to one of its posts); failures retry with backoff (5 s, 30 s, 2 min, 10 min, then hourly). URLs and keys never appear here.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -792,6 +817,10 @@ const TOOLS = [
       required: ['mail_id'],
     },
   },
+  // Joining a room by invite link (join.ts; each carries its own annotations).
+  ...JOIN_TOOLS,
+  // Searching messages (search.ts; carries its own annotations).
+  ...SEARCH_TOOLS,
 ];
 
 // ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
@@ -819,6 +848,11 @@ async function hubFetch(path: string, init: RequestInit = {}): Promise<Response>
 }
 
 async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await hubEnvelope<T>(path, init)).data;
+}
+
+/** hubJSON with the envelope's meta (a search's next_cursor). */
+async function hubEnvelope<T>(path: string, init: RequestInit = {}): Promise<{ data: T; meta?: Record<string, unknown> | null }> {
   const res = await hubFetch(path, init);
   const text = await res.text();
   let body: any = null;
@@ -836,7 +870,7 @@ async function hubJSON<T>(path: string, init: RequestInit = {}): Promise<T> {
       res.headers.get('x-approval-id') || undefined,
     );
   }
-  return (body?.data ?? body) as T;
+  return { data: (body?.data ?? body) as T, meta: body?.meta ?? null };
 }
 
 // previewToText flattens the api's structured preview into text an agent can
@@ -1119,9 +1153,9 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS.map((t) => ({
+  tools: [...TOOLS, ...QUESTION_TOOLS].map((t) => ({
     ...t,
-    ...(TOOL_META[t.name] ?? {}),
+    ...(TOOL_META[t.name] ?? QUESTION_TOOL_META[t.name] ?? {}),
     description: TOOL_DOCS[t.name] ? `${t.description} Docs: ${TOOL_DOCS[t.name]}` : t.description,
   })),
 }));
@@ -1131,6 +1165,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const args = (request.params.arguments || {}) as Record<string, unknown>;
 
   try {
+    // Joining a room by invite link (join.ts).
+    if (isJoinTool(name)) return await callJoinTool(name, args, hubJSON);
+    // Searching messages (search.ts).
+    if (isSearchTool(name)) return await callSearchTool(name, args, hubEnvelope);
     switch (name) {
       case 'grupr_rooms': {
         const rooms = await hubJSON<Record<string, unknown>[]>('/grups');
@@ -1336,44 +1374,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'grupr_send_message': {
-        const content = typeof args.content === 'string' ? args.content : '';
-        const attachments = Array.isArray(args.attachments)
-          ? args.attachments.filter((a: unknown): a is string => typeof a === 'string' && a.trim() !== '')
-          : [];
-        if (!content.trim() && attachments.length === 0) {
-          throw new Error('content or attachments is required');
-        }
-        const msg =
-          attachments.length > 0
-            ? await hubJSON<Message>(`/grups/${encodeURIComponent(String(args.grupr_id))}/messages`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content, attachments }),
-              })
-            : await session().client.sendMessage(String(args.grupr_id), content);
+        // A thread reply or attachments go to the hub directly (the SDK's
+        // sendMessage carries text only); plain text keeps the SDK path.
+        const send = sendMessageBody(args);
+        if (!send.ok) throw new Error(send.error);
+        const msg = send.needsHub
+          ? await hubJSON<Message & { thread_root_id?: string | null }>(`/grups/${encodeURIComponent(String(args.grupr_id))}/messages`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(send.body),
+            })
+          : await session().client.sendMessage(String(args.grupr_id), send.body.content);
         return {
           content: [
             {
               type: 'text',
-              text: `Posted. message_id=${msg.message_id} created_at=${msg.created_at}`,
+              text: describePosted(msg, send.body),
             },
           ],
         };
       }
 
       case 'grupr_register_webhook': {
-        const wh = await session().client.registerWebhook({
-          url: String(args.url),
-          secret: typeof args.secret === 'string' ? args.secret : undefined,
+        // Posted here rather than through the SDK's registerWebhook, which
+        // sends only url and secret: wake_on (Slack parity A1) and
+        // auth_bearer ride along. The bearer is never logged or echoed.
+        const wakeOn = parseWakeOn(args.wake_on);
+        if (!wakeOn.ok) return { isError: true, content: [{ type: 'text', text: wakeOn.error }] };
+        const body = registerWebhookBody(args, wakeOn.value);
+        const refusal = registerRefusal(body);
+        if (refusal) return { isError: true, content: [{ type: 'text', text: refusal }] };
+        const wh = await hubJSON<Record<string, unknown>>('/webhooks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Webhook registered. webhook_id=${wh.webhook_id} active=${wh.is_active}`,
-            },
-          ],
-        };
+        return { content: [{ type: 'text', text: describeRegistered(wh, wakeOn.value, Boolean(body.auth_bearer)) }] };
       }
 
       case 'grupr_delete_webhook': {
@@ -2059,6 +2095,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
+        // Ask the owner (questions.ts).
+        if (isQuestionTool(name)) return await callQuestionTool(name, args, hubJSON);
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (err: unknown) {
