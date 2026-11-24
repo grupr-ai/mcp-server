@@ -32,6 +32,7 @@ import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
+import { TRACES_DESCRIPTION, formatTraces, type Trace } from './traces.js';
 import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
@@ -302,8 +303,10 @@ const TOOLS = [
       "List the task contracts that bind you: your own and those of rooms you are in. A contract is the owner's statement of what done " +
       'looks like (a goal and acceptance checks) with a budget (runs, sandbox seconds, lens calls, deadline). Every command you run with ' +
       'grupr_workspace_run is recorded against the contract that applies (the one you name, else the room\'s, else yours), refused once ' +
-      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room). The checks say what the owner will hold ' +
-      'the work to; grading runs against them into pass/fail traces is not switched on yet. ' +
+      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room; exhausted says which: runs, sandbox_seconds, ' +
+      'lens_calls or deadline). The checks say what the owner holds the work to: every run is graded against them into a trace ' +
+      '(grupr_contract_traces), and a pass satisfies the contract (done, or with repeat it stays active), which may hand the work to the ' +
+      'next contract in its chain (`next_contract_id`, `chain`). ' +
       'Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply. ' +
       'A contract is also the handoff. `inputs` is what the work starts from, in order: Room Files (kind "file": read one with ' +
       'grupr_room_file_read, passing its `grupr_id` and `path`; `missing: true` means it is no longer in Room Files, so say so in the ' +
@@ -317,8 +320,11 @@ const TOOLS = [
     name: 'grupr_contract',
     description:
       'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused, and the ' +
-      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (with ' +
-      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`.',
+      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files; a contract handed the work ' +
+      'by the one before it gets the files that run published and a note naming the run and its trace), `next_action` (with ' +
+      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`, and `chain` (the contracts it is chained with, ' +
+      'first first; a "queued" one waits for the one before it to be satisfied, and paused_reason "waiting" means its agent or room still ' +
+      'has an open contract).',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
@@ -327,9 +333,7 @@ const TOOLS = [
   },
   {
     name: 'grupr_contract_traces',
-    description:
-      "The pass/fail traces of runs graded under a contract, newest first: verdict, each check's result and note, lens calls spent. " +
-      'Grading is not switched on yet, so this reads empty for now; once it is, read the latest trace to see why a run failed before you try again.',
+    description: TRACES_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -1485,11 +1489,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'grupr_contract_traces': {
         const n = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(200, Math.floor(args.limit))) : 50;
-        const list = await hubJSON<Record<string, unknown>[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
-        if (!Array.isArray(list) || list.length === 0) {
-          return { content: [{ type: 'text', text: 'No graded runs under this contract yet.' }] };
-        }
-        return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+        const list = await hubJSON<Trace[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
+        return { content: [{ type: 'text', text: formatTraces(list) }] };
       }
 
       case 'grupr_workspace_info': {
