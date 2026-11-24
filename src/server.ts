@@ -324,7 +324,8 @@ const TOOLS = [
       'by the one before it gets the files that run published and a note naming the run and its trace), `next_action` (with ' +
       '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`, and `chain` (the contracts it is chained with, ' +
       'first first; a "queued" one waits for the one before it to be satisfied, and paused_reason "waiting" means its agent or room still ' +
-      'has an open contract).',
+      'has an open contract). A chain link to another agent\'s contract, or to a room you are not in, reads `redacted: true` with its status ' +
+      'only, and `next_contract_id` is left out when the next contract is one of those.',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },

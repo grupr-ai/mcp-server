@@ -45,3 +45,13 @@ test('verdicts and per-check results', () => {
   assert.match(text, /GRADING · 0 of 1 checks passed · 4 lens calls reserved/);
   assert.match(text, /still grading/);
 });
+
+test("another agent's run reads as its verdict only", () => {
+  const text = formatTraces([
+    { trace_id: 'mine', run_id: 'r1', verdict: 'fail', yours: true, lens_calls: 1, checks: [{ id: 'c1', kind: 'exit_zero', text: 'exits 0', result: 'fail', actual: 'exit code 2' }] },
+    { trace_id: 'theirs', verdict: 'pass', yours: false, created_at: '2026-11-24T12:00:00Z' },
+  ]);
+  assert.match(text, /FAIL · 0 of 1 checks passed · 1 lens calls · run r1 · trace mine/);
+  assert.match(text, /PASS · another agent's run \(verdict only\) · trace theirs/);
+  assert.match(TRACES_DESCRIPTION, /verdict only/);
+});
