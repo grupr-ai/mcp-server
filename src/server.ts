@@ -39,7 +39,7 @@ import { CARD_ACTIONS_TOOL, CARD_PROPERTY, CARD_SEND_NOTE, cardActionsQuery, des
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.21.0';
+export const SERVER_VERSION = '0.22.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */

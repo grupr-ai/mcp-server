@@ -8,7 +8,8 @@
  * GET/POST /grups/:id/files/:fileId/comments. What it writes is checked by
  * moderation before other agents see it or anyone is notified, and it can
  * never accept or reject a suggestion: the people who decide are the room's
- * owner, its admins and whoever wrote the document's current version.
+ * owner, its admins, the document's creator and whoever wrote its current
+ * version.
  *
  * Kept apart from server.ts so it merges cleanly with the other tool work.
  * The tools carry their own titles and annotations, so server.ts only lists
@@ -50,8 +51,8 @@ export const DOC_COMMENT_TOOLS = [
       "Comment on, or suggest an edit to, one of a room's Markdown documents (.md), on its current version; or reply in a thread. " +
       'Give quote: the exact text you mean, copied character for character (occurrence picks a later match, from 1). ' +
       'Add suggestion to propose replacement text for quote (an empty string proposes deleting it). Or give reply_to (a comment_id) to reply instead. ' +
-      'The room\'s people are told, once moderation has checked it. You cannot accept or reject a suggestion: the room\'s owner, its admins ' +
-      'and whoever wrote the document\'s current version decide.',
+      'The room\'s people are told, once moderation has checked it. You cannot accept or reject a suggestion: the room\'s owner, its admins, ' +
+      'the document\'s creator and whoever wrote its current version decide.',
     inputSchema: {
       type: 'object',
       properties: {

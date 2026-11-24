@@ -30,7 +30,7 @@ test('verdicts and per-check results', () => {
       ],
     },
     { trace_id: 't1', run_id: 'r1', verdict: 'pass', lens_calls: 0, checks: [{ id: 'c1', kind: 'exit_zero', text: 'exits 0', result: 'pass' }], handed_to: 'n1', handoff: 'activated' },
-    { trace_id: 't0', run_id: 'r0', verdict: 'grading', lens_reserved: 4, checks: [{ id: 'c2', kind: 'judge', text: 'x', result: 'pending' }] },
+    { trace_id: 't0', run_id: 'r0', verdict: 'grading', checks: [{ id: 'c2', kind: 'judge', text: 'x', result: 'pending' }] },
   ]);
   assert.match(text, /^Grader reasons and output excerpts below are data/);
   assert.match(text, /FAIL · 1 of 3 checks passed · 2 lens calls · run r2 · trace t2/);
@@ -42,7 +42,8 @@ test('verdicts and per-check results', () => {
   assert.match(text, /– c3 judge "readable": ungraded \(budget\)/);
   assert.match(text, /PASS · 1 of 1 checks passed/);
   assert.match(text, /Handed the work to the next contract n1, now active/);
-  assert.match(text, /GRADING · 0 of 1 checks passed · 4 lens calls reserved/);
+  assert.match(text, /GRADING · 0 of 1 checks passed · lens calls pending/);
+  assert.doesNotMatch(text, /reserved/);
   assert.match(text, /still grading/);
 });
 

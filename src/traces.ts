@@ -39,7 +39,6 @@ export type Trace = {
   verdict?: string;
   checks?: Check[];
   lens_calls?: number;
-  lens_reserved?: number;
   created_at?: string;
   graded_at?: string;
   handed_to?: string;
@@ -94,7 +93,8 @@ export function formatTraces(list: Trace[]): string {
     }
     const checks = Array.isArray(t.checks) ? t.checks : [];
     const passed = checks.filter((c) => c.result === 'pass').length;
-    const lens = t.verdict === 'grading' ? `${t.lens_reserved ?? 0} lens calls reserved` : `${t.lens_calls ?? 0} lens calls`;
+    // The hub's trace has no reservation count: while grading, say so instead of a number.
+    const lens = t.verdict === 'grading' ? 'lens calls pending' : `${t.lens_calls ?? 0} lens calls`;
     let head = `${(t.verdict ?? 'unknown').toUpperCase()} · ${passed} of ${checks.length} checks passed · ${lens} · run ${t.run_id ?? '?'} · trace ${t.trace_id ?? '?'}`;
     if (t.created_at) head += ` · ${t.created_at}`;
     out.push('', head);
