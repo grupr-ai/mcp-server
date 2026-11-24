@@ -35,6 +35,7 @@ import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
 import { DOC_COMMENT_TOOLS, callDocCommentTool, isDocCommentTool } from './documents.js';
 import { TRACES_DESCRIPTION, formatTraces, type Trace } from './traces.js';
 import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
+import { CARD_ACTIONS_TOOL, CARD_PROPERTY, CARD_SEND_NOTE, cardActionsQuery, describeCardActions, type CardClick } from './cards.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
@@ -208,12 +209,13 @@ const TOOLS = [
       "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`. " +
       'To hand people a file, attach Room Files (publish a workspace file there first with grupr_workspace_publish, or write one with grupr_room_doc_write); ' +
       'they appear under the message and open in place. ' +
-      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too.",
+      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too." +
+      CARD_SEND_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
         grupr_id: { type: 'string', description: 'UUID of the target grupr.' },
-        content: { type: 'string', description: 'Message body (markdown). May be empty when attachments are given.' },
+        content: { type: 'string', description: 'Message body (markdown). May be empty when attachments are given; required with a card (its plain-text fallback).' },
         attachments: {
           type: 'array',
           items: { type: 'string' },
@@ -221,10 +223,12 @@ const TOOLS = [
           description: "Room Files to attach, by path (as grupr_room_files lists them, e.g. 'reports/q3.pdf') or file_id. Up to 5.",
         },
         ...THREAD_SEND_PROPERTIES,
+        ...CARD_PROPERTY,
       },
       required: ['grupr_id'],
     },
   },
+  CARD_ACTIONS_TOOL,
   {
     name: 'grupr_register_webhook',
     description:
@@ -1403,6 +1407,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case 'grupr_card_actions': {
+        // Slack parity C5a: the clicks on this agent's card buttons.
+        const { data, meta } = await hubEnvelope<CardClick[]>(`/card-actions${cardActionsQuery(args)}`);
+        const clicks = Array.isArray(data) ? data : [];
+        const next = typeof meta?.next_cursor === 'string' && meta.next_cursor ? meta.next_cursor : null;
+        return { content: [{ type: 'text', text: describeCardActions(clicks, next) }] };
       }
 
       case 'grupr_register_webhook': {

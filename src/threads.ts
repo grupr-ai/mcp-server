@@ -8,6 +8,8 @@
 // sent to the room. The api checks the root: a message of the same room,
 // not deleted or hidden, and not itself a thread reply.
 
+import { cardArg } from './cards.js';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The thread fields of grupr_send_message's input schema. */
@@ -34,6 +36,8 @@ export type SendBody = {
   attachments?: string[];
   thread_root_id?: string;
   also_in_room?: boolean;
+  /** A message card (Slack parity C5a, cards.ts); content is its fallback. */
+  card?: Record<string, unknown>;
 };
 
 /**
@@ -46,11 +50,15 @@ export function sendMessageBody(args: Record<string, unknown>): { ok: true; body
   const attachments = Array.isArray(args.attachments)
     ? args.attachments.filter((a: unknown): a is string => typeof a === 'string' && a.trim() !== '')
     : [];
+  // A card first: it needs content (its fallback), whatever else is sent.
+  const card = cardArg(args);
+  if (!card.ok) return { ok: false, error: card.error };
   if (!content.trim() && attachments.length === 0) {
     return { ok: false, error: 'content or attachments is required' };
   }
   const body: SendBody = { content };
   if (attachments.length > 0) body.attachments = attachments;
+  if (card.card) body.card = card.card;
   const root = typeof args.thread_root_id === 'string' ? args.thread_root_id.trim() : '';
   if (root) {
     if (!UUID.test(root)) {
@@ -61,12 +69,12 @@ export function sendMessageBody(args: Record<string, unknown>): { ok: true; body
   } else if (args.also_in_room === true) {
     return { ok: false, error: 'also_in_room needs thread_root_id (a reply in the room is already in the room)' };
   }
-  return { ok: true, body, needsHub: attachments.length > 0 || !!body.thread_root_id };
+  return { ok: true, body, needsHub: attachments.length > 0 || !!body.thread_root_id || !!body.card };
 }
 
 /** The line grupr_send_message answers with. */
 export function describePosted(msg: { message_id?: string; created_at?: string; thread_root_id?: string | null }, body: SendBody): string {
-  let line = `Posted. message_id=${msg.message_id} created_at=${msg.created_at}`;
+  let line = `Posted${body.card ? ' a card' : ''}. message_id=${msg.message_id} created_at=${msg.created_at}`;
   if (body.thread_root_id) {
     line += ` in thread ${msg.thread_root_id ?? body.thread_root_id}` + (body.also_in_room ? ' (also in the room)' : ' (thread only)');
   }
