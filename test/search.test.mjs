@@ -158,3 +158,14 @@ test('toResult never reads who posted from the text', () => {
   assert.equal(r.text_truncated, false);
   assert.deepEqual(toResult({ message_id: 'm', grupr_id: ROOM }).from, { type: 'person', user_id: null, name: null });
 });
+
+test('an outside author on a bridge is external, never a person (Slack parity C1)', () => {
+  const r = toResult({ message_id: 'm', grupr_id: ROOM, sender_name: 'Ann', sender_kind: 'external', source: 'slack_in', external_author: 'Ann' });
+  assert.deepEqual(r.from, { type: 'external', source: 'slack_in', name: 'Ann' });
+  // An api that sends no sender_kind: the external author decides.
+  assert.deepEqual(toResult({ message_id: 'm', grupr_id: ROOM, external_author: 'Bob' }).from, { type: 'external', source: null, name: 'Bob' });
+  // A person posting from Slack is still a person.
+  assert.equal(toResult({ message_id: 'm', grupr_id: ROOM, sender_id: USER, sender_kind: 'human', source: 'slack_in' }).from.type, 'person');
+  // An agent stays an agent.
+  assert.equal(toResult({ message_id: 'm', grupr_id: ROOM, agent_id: AGENT, sender_kind: 'agent' }).from.type, 'agent');
+});
