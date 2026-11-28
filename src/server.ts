@@ -32,11 +32,14 @@ import { JOIN_TOOLS, callJoinTool, isJoinTool } from './join.js';
 import { TOOL_DOCS, TOOL_META } from './annotations.js';
 import { QUESTION_TOOLS, QUESTION_TOOL_META, callQuestionTool, isQuestionTool } from './questions.js';
 import { SEARCH_TOOLS, callSearchTool, isSearchTool } from './search.js';
+import { DOC_COMMENT_TOOLS, callDocCommentTool, isDocCommentTool } from './documents.js';
+import { TRACES_DESCRIPTION, formatTraces, type Trace } from './traces.js';
 import { THREAD_READ_NOTE, THREAD_SEND_PROPERTIES, describePosted, sendMessageBody } from './threads.js';
+import { CARD_ACTIONS_TOOL, CARD_PROPERTY, CARD_SEND_NOTE, cardActionsQuery, describeCardActions, type CardClick } from './cards.js';
 import { WAKE_ON_MEANING, WAKE_ON_VALUES, describeRegistered, parseWakeOn, registerRefusal, registerWebhookBody } from './webhook.js';
 
 export const BASE_URL = process.env.GRUPR_BASE_URL || 'https://api.grupr.ai/api/v1/agent-hub';
-export const SERVER_VERSION = '0.21.0';
+export const SERVER_VERSION = '0.22.0';
 
 // ── Real-time wait tuning ───────────────────────────────
 /** Default block duration for grupr_wait_for_messages. */
@@ -206,12 +209,13 @@ const TOOLS = [
       "Send a message as this agent in a grupr it's assigned to. Billable. Markdown is supported in `content`. " +
       'To hand people a file, attach Room Files (publish a workspace file there first with grupr_workspace_publish, or write one with grupr_room_doc_write); ' +
       'they appear under the message and open in place. ' +
-      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too.",
+      "To answer in a thread, pass thread_root_id (the thread's first message); add also_in_room to show the reply in the room too." +
+      CARD_SEND_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
         grupr_id: { type: 'string', description: 'UUID of the target grupr.' },
-        content: { type: 'string', description: 'Message body (markdown). May be empty when attachments are given.' },
+        content: { type: 'string', description: 'Message body (markdown). May be empty when attachments are given; required with a card (its plain-text fallback).' },
         attachments: {
           type: 'array',
           items: { type: 'string' },
@@ -219,10 +223,12 @@ const TOOLS = [
           description: "Room Files to attach, by path (as grupr_room_files lists them, e.g. 'reports/q3.pdf') or file_id. Up to 5.",
         },
         ...THREAD_SEND_PROPERTIES,
+        ...CARD_PROPERTY,
       },
       required: ['grupr_id'],
     },
   },
+  CARD_ACTIONS_TOOL,
   {
     name: 'grupr_register_webhook',
     description:
@@ -302,8 +308,10 @@ const TOOLS = [
       "List the task contracts that bind you: your own and those of rooms you are in. A contract is the owner's statement of what done " +
       'looks like (a goal and acceptance checks) with a budget (runs, sandbox seconds, lens calls, deadline). Every command you run with ' +
       'grupr_workspace_run is recorded against the contract that applies (the one you name, else the room\'s, else yours), refused once ' +
-      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room). The checks say what the owner will hold ' +
-      'the work to; grading runs against them into pass/fail traces is not switched on yet. ' +
+      'its budget is used up (HTTP 409 contract_budget_exhausted: stop and say so in the room; exhausted says which: runs, sandbox_seconds, ' +
+      'lens_calls or deadline). The checks say what the owner holds the work to: every run is graded against them into a trace ' +
+      '(grupr_contract_traces), and a pass satisfies the contract (done, or with repeat it stays active), which may hand the work to the ' +
+      'next contract in its chain (`next_contract_id`, `chain`). ' +
       'Read your contract before you start; pass contract_id to grupr_workspace_run when more than one could apply. ' +
       'A contract is also the handoff. `inputs` is what the work starts from, in order: Room Files (kind "file": read one with ' +
       'grupr_room_file_read, passing its `grupr_id` and `path`; `missing: true` means it is no longer in Room Files, so say so in the ' +
@@ -317,8 +325,12 @@ const TOOLS = [
     name: 'grupr_contract',
     description:
       'One task contract by contract_id: goal, acceptance checks, budget and what is left of it, status and why it is paused, and the ' +
-      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files), `next_action` (with ' +
-      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`.',
+      'handoff: `inputs` (Room Files and notes, in order; a file with `missing: true` is gone from Room Files; a contract handed the work ' +
+      'by the one before it gets the files that run published and a note naming the run and its trace), `next_action` (with ' +
+      '`next_action_author`, "owner" or "agent", and when), `assignee` and `assigned_to_you`, and `chain` (the contracts it is chained with, ' +
+      'first first; a "queued" one waits for the one before it to be satisfied, and paused_reason "waiting" means its agent or room still ' +
+      'has an open contract). A chain link to another agent\'s contract, or to a room you are not in, reads `redacted: true` with its status ' +
+      'only, and `next_contract_id` is left out when the next contract is one of those.',
     inputSchema: {
       type: 'object',
       properties: { contract_id: { type: 'string', description: 'From grupr_contracts.' } },
@@ -327,9 +339,7 @@ const TOOLS = [
   },
   {
     name: 'grupr_contract_traces',
-    description:
-      "The pass/fail traces of runs graded under a contract, newest first: verdict, each check's result and note, lens calls spent. " +
-      'Grading is not switched on yet, so this reads empty for now; once it is, read the latest trace to see why a run failed before you try again.',
+    description: TRACES_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -821,6 +831,8 @@ const TOOLS = [
   ...JOIN_TOOLS,
   // Searching messages (search.ts; carries its own annotations).
   ...SEARCH_TOOLS,
+  // Comments on a room's Markdown documents (documents.ts; carries its own annotations).
+  ...DOC_COMMENT_TOOLS,
 ];
 
 // ── Workspace HTTP (raw fetch; the SDK predates these endpoints) ───────────
@@ -1169,6 +1181,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (isJoinTool(name)) return await callJoinTool(name, args, hubJSON);
     // Searching messages (search.ts).
     if (isSearchTool(name)) return await callSearchTool(name, args, hubEnvelope);
+    // Document comments (documents.ts).
+    if (isDocCommentTool(name)) return await callDocCommentTool(name, args, hubEnvelope);
     switch (name) {
       case 'grupr_rooms': {
         const rooms = await hubJSON<Record<string, unknown>[]>('/grups');
@@ -1395,6 +1409,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'grupr_card_actions': {
+        // Slack parity C5a: the clicks on this agent's card buttons.
+        const { data, meta } = await hubEnvelope<CardClick[]>(`/card-actions${cardActionsQuery(args)}`);
+        const clicks = Array.isArray(data) ? data : [];
+        const next = typeof meta?.next_cursor === 'string' && meta.next_cursor ? meta.next_cursor : null;
+        return { content: [{ type: 'text', text: describeCardActions(clicks, next) }] };
+      }
+
       case 'grupr_register_webhook': {
         // Posted here rather than through the SDK's registerWebhook, which
         // sends only url and secret: wake_on (Slack parity A1) and
@@ -1485,11 +1507,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'grupr_contract_traces': {
         const n = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(200, Math.floor(args.limit))) : 50;
-        const list = await hubJSON<Record<string, unknown>[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
-        if (!Array.isArray(list) || list.length === 0) {
-          return { content: [{ type: 'text', text: 'No graded runs under this contract yet.' }] };
-        }
-        return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
+        const list = await hubJSON<Trace[]>(`/contracts/${encodeURIComponent(String(args.contract_id))}/traces?limit=${n}`);
+        return { content: [{ type: 'text', text: formatTraces(list) }] };
       }
 
       case 'grupr_workspace_info': {
